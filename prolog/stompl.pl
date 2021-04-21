@@ -1,29 +1,46 @@
+/* Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http:  www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 :- module(stompl,
           [ stomp_connection/5,    % +Address, +Host, +Headers,
                                    % :Callback, -Connection
-            stomp_setup/1,         % +Connection
-            stomp_teardown/1,      % +Connection
             stomp_connect/1,       % +Connection
+            stomp_teardown/1,      % +Connection
             stomp_send/4,          % +Connection, +Destination, +Headers, +Body
             stomp_send_json/4,     % +Connection, +Destination, +Headers, +JSON
             stomp_subscribe/4,     % +Connection, +Destination, +Id, +Headers
             stomp_unsubscribe/2,   % +Connection, +Id
             stomp_ack/3,           % +Connection, +MessageId, +Headers
             stomp_nack/3,          % +Connection, +MessageId, +Headers
+            stomp_transaction/2,   % +Connection, :Goal
+            stomp_disconnect/2,    % +Connection, +Headers
+                                   % Low level predicates
             stomp_begin/2,         % +Connection, +Transaction
             stomp_commit/2,        % +Connection, +Transaction
             stomp_abort/2,         % +Connection, +Transaction
-            stomp_transaction/2,   % +Connection, :Goal
-            stomp_disconnect/2     % +Connection, +Headers
+            stomp_setup/1          % +Connection
           ]).
 
 /** <module> STOMP client.
+
+This module provides a STOMP  (Simple   (or  Streaming)  Text Orientated
+Messaging Protocol) client. This client  is   based  on  work by Hongxin
+Liang. The current version is a major rewrite, both changing the API and
+the low-level STOMP frame (de)serialization.
+
 A STOMP 1.0 and 1.1 compatible client.
 
-[stomp.py](https://github.com/jasonrbriggs/stomp.py)
-is used as a reference for the implementation.
-
-@author Hongxin Liang
+@author Hongxin Liang and Jan Wielemaker
 @license Apache License Version 2.0
 @see http://stomp.github.io/index.html
 @see https://github.com/jasonrbriggs/stomp.py
@@ -176,9 +193,11 @@ reset_connection_properties(Connection) :-
 %
 %   Calling this on an established connection has no effect.
 %
-%   This call waits for the `connected` reply for
+%   This call waits for the `connected` reply for 10 seconds.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#CONNECT_or_STOMP_Frame).
+%   @error stomp_error(connect, Connection) if no connection could be
+%   established.
 %   @tbd 1.2 doesn't bring much benefit but trouble
 
 stomp_connect(Connection) :-
@@ -199,12 +218,24 @@ stomp_connect(Connection) :-
         update_connection_property(Connection, waiting_thread, Self),
         (   thread_get_message(Self, stomp(connected(Connection)),
                                [timeout(10)])
-        ->  true
+        ->  get_time(Now),
+            update_connection_property(Connection, connected, Now)
         ;   stomp_teardown(Connection),
-            throw(error(stomp_error(connect), _))
+            throw(error(stomp_error(connect, Connection), _))
         )
-    ;   true
+    ;   connection_property(Connection, connected, _)
+    ->  true
+    ;   wait_connected(Connection)
     ).
+
+wait_connected(Connection) :-
+    thread_wait(connection_property(Connection, connected, _),
+                [ timeout(10),
+                  wait_preds([connection_property/3])
+                ]),
+    !.
+wait_connected(Connection) :-
+    throw(error(stomp_error(connect, Connection), _)).
 
 
 %!  stomp_send(+Connection, +Destination, +Headers, +Body) is det.
