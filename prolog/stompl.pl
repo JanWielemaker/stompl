@@ -301,7 +301,7 @@ stomp_transaction(Connection, Goal, TransactionID) :-
 in_transaction(TransactionID) :-
     prolog_current_frame(Frame),
     prolog_frame_attribute(
-        Frame, parent_frame,
+        Frame, parent_goal,
         stomp_transaction(_Connection, _Goal, TransactionID)).
 
 add_transaction(Headers, Headers1) :-
