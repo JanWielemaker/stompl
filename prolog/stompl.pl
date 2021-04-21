@@ -114,9 +114,18 @@ connection_property(headers).
 %   is a no-op if the connection has already been created.
 
 stomp_setup(Connection) :-
+    stomp_setup(Connection, _New).
+
+stomp_setup(Connection, false) :-
     connection_property(Connection, stream, _Stream),
     !.
-stomp_setup(Connection) :-
+stomp_setup(Connection, New) :-
+    with_mutex(stompl, stomp_setup_guarded(Connection, New)).
+
+stomp_setup_guarded(Connection, false) :-
+    connection_property(Connection, stream, _Stream),
+    !.
+stomp_setup_guarded(Connection, true) :-
     connection_property(Connection, address, Address),
     tcp_connect(Address, Stream, []),
     gensym(stompl_receive, Alias),
@@ -158,26 +167,42 @@ reset_connection_properties(Connection) :-
     forall(member(P, Ps),
            retractall(connection_property(Connection, P, _))).
 
-%!  stomp_connect(+Connectio) is det.
+%!  stomp_connect(+Connection) is det.
 %
-%   Send a ``CONNECT`` frame. Protocol version and heartbeat negotiation
-%   will  be  handled.  ``STOMP``  frame  is    not  used  for  backward
-%   compatibility.
+%   Setup the connection. First ensures a  socket connection and if this
+%   is new send a ``CONNECT``  frame.   Protocol  version  and heartbeat
+%   negotiation will be  handled.  ``STOMP``  frame   is  not  used  for
+%   backward compatibility.
+%
+%   Calling this on an established connection has no effect.
+%
+%   This call waits for the `connected` reply for
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#CONNECT_or_STOMP_Frame).
 %   @tbd 1.2 doesn't bring much benefit but trouble
 
 stomp_connect(Connection) :-
-    stomp_setup(Connection),
-    connection_property(Connection, headers, Headers),
-    connection_property(Connection, host, Host),
-    send_frame(Connection,
-               connect,
-               Headers.put(_{ 'accept-version':'1.0,1.1',
-                               host:Host
-                            })),
-    (   Heartbeat = Headers.get('heart-beat')
-    ->  update_connection_property(Connection, 'heart-beat', Heartbeat)
+    stomp_setup(Connection, New),
+    (   New == true
+    ->  connection_property(Connection, headers, Headers),
+        connection_property(Connection, host, Host),
+        send_frame(Connection,
+                   connect,
+                   Headers.put(_{ 'accept-version':'1.0,1.1',
+                                  host:Host
+                                })),
+        (   Heartbeat = Headers.get('heart-beat')
+        ->  update_connection_property(Connection, 'heart-beat', Heartbeat)
+        ;   true
+        ),
+        thread_self(Self),
+        update_connection_property(Connection, waiting_thread, Self),
+        (   thread_get_message(Self, stomp(connected(Connection)),
+                               [timeout(10)])
+        ->  true
+        ;   stomp_teardown(Connection),
+            throw(error(stomp_error(connect), _))
+        )
     ;   true
     ).
 
@@ -323,19 +348,34 @@ stomp_disconnect(Connection, Headers) :-
 %!  send_frame(+Connection, +Command, +Headers) is det.
 %!  send_frame(+Connection, +Command, +Headers, +Body) is det.
 
-send_frame(Connection, heartbeat, _Headers) :-
+send_frame(Connection, Command, Headers) :-
+    Error = error(_,_),
+    catch(send_frame_guarded(Connection, Command, Headers),
+          Error,
+          send_failed(Connection, Error)).
+send_frame(Connection, Command, Headers, Body) :-
+    Error = error(_,_),
+    catch(send_frame_guarded(Connection, Command, Headers, Body),
+          Error,
+          send_failed(Connection, Error)).
+
+send_failed(Connection, Error) :-
+    notify(Connection, disconnected),
+    throw(Error).
+
+send_frame_guarded(Connection, heartbeat, _Headers) :-
     !,
-    connection_property(Connection, stream, Stream),
+    connection_stream(Connection, Stream),
     put_code(Stream, 0'\n),
     flush_output(Stream).
-send_frame(Connection, Command, Headers) :-
+send_frame_guarded(Connection, Command, Headers) :-
     assertion(\+has_body(Command)),
     send_frame(Connection, Command, Headers, '').
 
-send_frame(Connection, Command, Headers, Body) :-
+send_frame_guarded(Connection, Command, Headers, Body) :-
     has_body(Command),
     !,
-    connection_property(Connection, stream, Stream),
+    connection_stream(Connection, Stream),
     default_content_type('text/plain', Headers, Headers1),
     body_bytes(Body, ContentLength),
     Headers2 = Headers1.put('content-length', ContentLength),
@@ -343,12 +383,21 @@ send_frame(Connection, Command, Headers, Body) :-
     send_header(Stream, Headers2),
     format(Stream, '~w\u0000\n', [Body]),
     flush_output(Stream).
-send_frame(Connection, Command, Headers, _Body) :-
-    connection_property(Connection, stream, Stream),
+send_frame_guarded(Connection, Command, Headers, _Body) :-
+    connection_stream(Connection, Stream),
     send_command(Stream, Command),
     send_header(Stream, Headers),
     format(Stream, '\u0000\n', []),
     flush_output(Stream).
+
+%!  connection_stream(+Connection, -Stream)
+
+connection_stream(Connection, Stream) :-
+    connection_property(Connection, stream, Stream),
+    !.
+connection_stream(Connection, Stream) :-
+    stomp_connect(Connection),
+    connection_property(Connection, stream, Stream).
 
 send_command(Stream, Command) :-
     string_upper(Command, Upper),
@@ -539,10 +588,17 @@ process_frame(Connection, Frame) :-
 process_frame(Connection, Frame) :-
     _{cmd:FrameType, headers:Headers} :< Frame,
     (   FrameType == connected
-    ->  start_heartbeat_if_required(Connection, Headers)
+    ->  notify_connected(Connection),
+        start_heartbeat_if_required(Connection, Headers)
     ;   true
     ),
     notify(Connection, FrameType, Headers).
+
+notify_connected(Connection) :-
+    retract(connection_property(Connection, waiting_thread, Waiting)),
+    !,
+    thread_send_message(Waiting, stomp(connected(Connection))).
+notify_connected(_).
 
 start_heartbeat_if_required(Connection, Headers) :-
     (   connection_property(Connection, 'heart-beat', CHB),
