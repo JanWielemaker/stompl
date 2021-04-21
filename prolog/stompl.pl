@@ -95,19 +95,19 @@ teardown(Connection) :-
     get_mapping_data(Connection, receiver_thread_id, ReceiverThreadId),
     (   \+ thread_self(ReceiverThreadId),
         thread_property(ReceiverThreadId, status(running))
-    ->  debug(stompl, 'attempting to kill receive thread ~w', [ReceiverThreadId]),
+    ->  debug(stompl(connection), 'attempting to kill receive thread ~w', [ReceiverThreadId]),
         thread_signal(ReceiverThreadId, throw(kill))
     ;   true
     ),
     (   get_mapping_data(Connection, heartbeat_thread_id, HeartbeatThreadId)
     ->  (   thread_property(HeartbeatThreadId, status(running))
-        ->  debug(stompl, 'attempting to kill heartbeat thread ~w', [HeartbeatThreadId]),
+        ->  debug(stompl(connection), 'attempting to kill heartbeat thread ~w', [HeartbeatThreadId]),
             thread_signal(HeartbeatThreadId, throw(kill))
         )
     ),
     get_mapping_data(Connection, stream, Stream),
     catch(close(Stream), _, true), %% close it anyway
-    debug(stompl, 'retract connection mapping', []),
+    debug(stompl(connection), 'retract connection mapping', []),
     retract(connection_mapping(Connection, _)).
 
 %% connect(+Connectio, +Host, +Headers) is semidet.
@@ -241,7 +241,7 @@ send0(Connection, Frame, EndWithNull) :-
     ->  atom_concat(Frame, '\x00', Frame1)
     ;   Frame1 = Frame
     ),
-    debug(stompl, 'frame to send~n~w', [Frame1]),
+    debug(stompl(send), 'frame to send~n~w', [Frame1]),
     get_mapping_data(Connection, stream, Stream),
     format(Stream, '~w', [Frame1]),
     flush_output(Stream).
@@ -279,11 +279,11 @@ receive0(Connection, Stream, Buffered) :-
     (   catch(receive_frames(Stream, Frames, Buffered, Buffered1), E, true)
     ->  (   nonvar(E)
         ->  E = exception(disconnected),
-            debug(stompl, 'disconnected', []),
+            debug(stompl(connection), 'disconnected', []),
             notify(Connection, disconnected)
-        ;   debug(stompl, 'frames received~n~w', [Frames]),
+        ;   debug(stompl(message), 'frames received~n~w', [Frames]),
             handle_frames(Connection, Frames),
-            debug(stompl, 'frames handled', []),
+            debug(stompl(message), 'frames handled', []),
             receive0(Connection, Stream, Buffered1)
         )
     ).
@@ -294,12 +294,12 @@ receive_frames(Stream, Frames, Buffered0, Buffered) :-
     ;   read_pending_input(Stream, Codes, [])
     ),
     atom_codes(Chars, Codes),
-    debug(stompl, 'received~n~w', [Chars]),
+    debug(stompl(frame), 'received~n~w', [Chars]),
     (   Chars = '\x0a'
     ->  Buffered = Buffered0,
         Frames = [Chars]
     ;   atom_concat(Buffered0, Chars, Buffered1),
-        debug(stompl, 'current buffer~n~w', [Buffered1]),
+        debug(stompl(frame), 'current buffer~n~w', [Buffered1]),
         extract_frames(Frames, Buffered1, Buffered)
     ).
 
@@ -356,7 +356,7 @@ read_content_length(Frame, Length) :-
 handle_frames(_, []) :- !.
 handle_frames(Connection, [H|T]) :-
     parse_frame(H, ParsedFrame),
-    debug(stompl, 'parsed frame~n~w', [ParsedFrame]),
+    debug(stompl(frame), 'parsed frame~n~w', [ParsedFrame]),
     process_frame(Connection, ParsedFrame),
     handle_frames(Connection, T).
 
@@ -399,7 +399,7 @@ replace(A0, A) :-
 process_frame(Connection, Frame) :-
     Frame.cmd = heartbeat, !,
     get_time(Now),
-    debug(stompl, 'received heartbeat at ~w', [Now]),
+    debug(stompl(heartbeat), 'received heartbeat at ~w', [Now]),
     update_connection_mapping(Connection, _{received_heartbeat:Now}).
 process_frame(Connection, Frame) :-
     downcase_atom(Frame.cmd, FrameType),
@@ -421,7 +421,7 @@ start_heartbeat(Connection, CHB, SHB) :-
     extract_heartbeats(SHB, SX, SY),
     calculate_heartbeats(CX-CY, SX-SY, X-Y),
     X-Y \= 0-0, !,
-    debug(stompl, 'calculated heartbeats are ~w,~w', [X, Y]),
+    debug(stompl(heartbeat), 'calculated heartbeats are ~w,~w', [X, Y]),
     SendSleep is X / 1000,
     ReceiveSleep is Y / 1000 + 2,
     (   SendSleep = 0
@@ -463,14 +463,14 @@ heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime) :-
     get_time(Now),
     (   Now - SendTime > SendSleep
     ->  SendTime1 = Now,
-        debug(stompl, 'sending a heartbeat message at ~w', [Now]),
+        debug(stompl(heartbeat), 'sending a heartbeat message at ~w', [Now]),
         send0(Connection, '\x0a', false)
     ;   SendTime1 = SendTime
     ),
     get_mapping_data(Connection, received_heartbeat, ReceivedHeartbeat),
     DiffReceive is Now - ReceivedHeartbeat,
     (   DiffReceive > ReceiveSleep
-    ->  debug(stompl,
+    ->  debug(stompl(heartbeat),
               'heartbeat timeout: diff_receive=~w, time=~w, lastrec=~w',
               [DiffReceive, Now, ReceivedHeartbeat]),
         notify(Connection, heartbeat_timeout)
@@ -482,7 +482,7 @@ notify(Connection, FrameType) :-
     get_mapping_data(Connection, callbacks, CallbackDict),
     atom_concat(on_, FrameType, Key),
     (   Predicate = CallbackDict.get(Key)
-    ->  debug(stompl, 'callback predicate ~w', [Predicate]),
+    ->  debug(stompl(callback), 'callback predicate ~w', [Predicate]),
         ignore(call(Predicate, Connection))
     ;   true
     ).
@@ -491,7 +491,7 @@ notify(Connection, FrameType, Frame) :-
     get_mapping_data(Connection, callbacks, CallbackDict),
     atom_concat(on_, FrameType, Key),
     (   Predicate = CallbackDict.get(Key)
-    ->  debug(stompl, 'callback predicate ~w', [Predicate]),
+    ->  debug(stompl(callback), 'callback predicate ~w', [Predicate]),
         ignore(call(Predicate, Connection, Frame.headers, Frame.body))
     ;   true
     ).
