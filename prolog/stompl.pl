@@ -3,7 +3,6 @@
             stomp_setup/1,         % +Connection
             stomp_teardown/1,      % +Connection
             stomp_connect/3,       % +Connection, +Host, +Headers
-            stomp_send/3,          % +Connection, +Destination, +Headers
             stomp_send/4,          % +Connection, +Destination, +Headers, +Body
             stomp_send_json/4,     % +Connection, +Destination, +Headers, +JSON
             stomp_subscribe/4,     % +Connection, +Destination, +Id, +Headers
@@ -143,7 +142,6 @@ stomp_connect(Connection, Host, Headers) :-
     ).
 
 
-%!  stomp_send(+Connection, +Destination, +Headers) is det.
 %!  stomp_send(+Connection, +Destination, +Headers, +Body) is det.
 %
 %   Send  a  ``SEND``  frame.  If   ``content-type``  is  not  provided,
@@ -151,9 +149,6 @@ stomp_connect(Connection, Host, Headers) :-
 %   automatically.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#SEND
-
-stomp_send(Connection, Destination, Headers) :-
-    stomp_send(Connection, Destination, Headers).
 
 stomp_send(Connection, Destination, Headers, Body) :-
     add_transaction(Headers, Headers1),
