@@ -43,31 +43,29 @@ is used as a reference for the implementation.
 :- dynamic
     connection_mapping/2.
 
-%% connected(+Address, -Connected) is det.
-%% connected(+Address, +CallbackDict, -Connected) is det.
+%!  connected(+Address, -Connected) is det.
+%!  connected(+Address, +CallbackDict, -Connected) is det.
 %
-% Create a connection reference. The connection
-% is not set up yet by this predicate.
-% If =CallbackDict= is provided, it will be associated
-% with the connection reference. Valid keys of the dict
-% are:
-% ==
-% on_connected
-% on_disconnected
-% on_message
-% on_heartbeat_timeout
-% on_error
-% ==
-% When registering callbacks, both module name and predicate
-% name shall be provided in the format of module:predicate.
-% Valid predicate signatures for example could be:
-% ==
-% example:on_connected_handler(Connection, Headers, Body)
-% example:on_disconnected_handler(Connection)
-% example:on_message_handler(Connection, Headers, Body)
-% example:on_heartbeat_timeout_handler(Connection)
-% example:on_error_handler(Connection, Headers, Body)
-% ==
+%   Create a connection reference. The connection is   not set up yet by
+%   this predicate. If CallbackDict is provided,   it will be associated
+%   with the connection reference. Valid  keys   of  the dict are below,
+%   together with the additional arguments passed.   `Header`  is a dict
+%   holding the STOMP frame header, where  all values are strings except
+%   for the `'content-length'` key value which is passed as an integer.
+%
+%   Body  is  a   string   or,   if   the    data   is   of   the   type
+%   ``application/json``, a dict.
+%
+%     - on_connected:Closure
+%       Called as call(Closure, Connection, Header)
+%     - on_disconnected:Closure
+%       Called as call(Closure, Connection, Header)
+%     - on_message:Closure
+%       Called as call(Closure, Connection, Header, Body)
+%     - on_heartbeat_timeout:Closure
+%       Called as call(Closure, Connection, Header)
+%     - on_error:Closure
+%       Called as call(Closure, Connection, Header, Body)
 
 connection(Address, Connection) :-
     connection(Address, Connection, _{}).
@@ -414,12 +412,20 @@ unesc(_) --> [C], { syntax_error(invalid_stomp_escape(C)) }.
 %   number of newlines. We leave them in place to avoid blocking.
 
 read_content(Stream, Header, Content) :-
-    Bytes = Header.'content-length',
-    !,
+    _{ 'content-length':Bytes,
+       'content-type':Type
+     } :< Header,
     setup_call_cleanup(
         stream_range_open(Stream, DataStream, [size(Bytes)]),
-        read_string(DataStream, _, Content),
+        read_content(Type, DataStream, Header, Content),
         close(DataStream)).
+
+read_content("application/json", Stream, _Header, Content) :-
+    !,
+    json_read_dict(Stream, Content).
+read_content(_Type, Stream, _Header, Content) :-
+    read_string(Stream, _, Content).
+
 
 %!  receive(+Connection, +Stream) is det.
 %
