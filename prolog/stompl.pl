@@ -1,21 +1,21 @@
-:- module(stompl, [
-                   connection/2,    % +Address, -Connection
-                   connection/3,    % +Address, +CallbackDict, -Connection
-                   setup/1,         % +Connection
-                   teardown/1,      % +Connection
-                   connect/3,       % +Connection, +Host, +Headers
-                   send/3,          % +Connection, +Destination, +Headers
-                   send/4,          % +Connection, +Destination, +Headers, +Body
-                   send_json/4,     % +Connection, +Destination, +Headers, +JSON
-                   subscribe/4,     % +Connection, +Destination, +Id, +Headers
-                   unsubscribe/2,   % +Connection, +Id
-                   ack/3,           % +Connection, +MessageId, +Headers
-                   nack/3,          % +Connection, +MessageId, +Headers
-                   begin/2,         % +Connection, +Transaction
-                   commit/2,        % +Connection, +Transaction
-                   abort/2,         % +Connection, +Transaction
-                   disconnect/2     % +Connection, +Headers
-                  ]).
+:- module(stompl,
+          [ connection/2,    % +Address, -Connection
+            connection/3,    % +Address, +CallbackDict, -Connection
+            setup/1,         % +Connection
+            teardown/1,      % +Connection
+            connect/3,       % +Connection, +Host, +Headers
+            send/3,          % +Connection, +Destination, +Headers
+            send/4,          % +Connection, +Destination, +Headers, +Body
+            send_json/4,     % +Connection, +Destination, +Headers, +JSON
+            subscribe/4,     % +Connection, +Destination, +Id, +Headers
+            unsubscribe/2,   % +Connection, +Id
+            ack/3,           % +Connection, +MessageId, +Headers
+            nack/3,          % +Connection, +MessageId, +Headers
+            begin/2,         % +Connection, +Transaction
+            commit/2,        % +Connection, +Transaction
+            abort/2,         % +Connection, +Transaction
+            disconnect/2     % +Connection, +Headers
+          ]).
 
 /** <module> STOMP client.
 A STOMP 1.0 and 1.1 compatible client.
@@ -119,33 +119,35 @@ teardown(Connection) :-
 % negotiation will be handled. =STOMP= frame is not used
 % for backward compatibility.
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#CONNECT_or_STOMP_Frame).
+%
+% %% 1.2 doesn't bring much benefit but trouble
 
 connect(Connection, Host, Headers) :-
-    create_frame('CONNECT',
-                 Headers.put(_{
-                               'accept-version':'1.0,1.1', %% 1.2 doesn't bring much benefit but trouble
+    send_frame(Connection,
+               connect,
+               Headers.put(_{ 'accept-version':'1.0,1.1',
                                host:Host
-                              }),
-                 '', Frame),
+                            })),
     (   Heartbeat = Headers.get('heart-beat')
     ->  update_connection_mapping(Connection, _{'heart-beat':Heartbeat})
     ;   true
-    ),
-    send0(Connection, Frame).
+    ).
 
-%% send(+Connection, +Destination, +Headers) is semidet.
-%% send(+Connection, +Destination, +Headers, +Body) is semidet.
+
+%!  send(+Connection, +Destination, +Headers) is det.
+%!  send(+Connection, +Destination, +Headers, +Body) is det.
 %
-% Send a =SEND= frame. If =content-type= is not provided, =text/plain=
-% will be used. =content-length= will be filled in automatically.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#SEND).
+%   Send  a  ``SEND``  frame.  If   ``content-type``  is  not  provided,
+%   ``text/plain`` will be used. ``content-length``   will  be filled in
+%   automatically.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#SEND
 
 send(Connection, Destination, Headers) :-
-    send(Connection, Destination, Headers, '').
+    send(Connection, Destination, Headers).
 
 send(Connection, Destination, Headers, Body) :-
-    create_frame('SEND', Headers.put(destination, Destination), Body, Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, send, Headers.put(destination, Destination), Body).
 
 %% send_json(+Connection, +Destination, +Headers, +JSON) is semidet.
 %
@@ -155,14 +157,12 @@ send(Connection, Destination, Headers, Body) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#SEND).
 
 send_json(Connection, Destination, Headers, JSON) :-
-    atom_json_term(Body, JSON, [as(atom)]),
-    create_frame('SEND',
-                 Headers.put(_{
-                               destination:Destination,
-                               'content-type':'application/json'
-                              }),
-                 Body, Frame),
-    send0(Connection, Frame).
+    atom_json_term(Body, JSON, [as(string)]),
+    send_frame(Connection, send,
+               Headers.put(_{ destination:Destination,
+                              'content-type':'application/json'
+                            }),
+               Body).
 
 %% subscribe(+Connection, +Destination, +Id, +Headers) is semidet.
 %
@@ -170,8 +170,8 @@ send_json(Connection, Destination, Headers, JSON) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#SUBSCRIBE).
 
 subscribe(Connection, Destination, Id, Headers) :-
-    create_frame('SUBSCRIBE', Headers.put(_{destination:Destination, id:Id}), '', Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, subscribe,
+               Headers.put(_{destination:Destination, id:Id})).
 
 %% unsubscribe(+Connection, +Id) is semidet.
 %
@@ -179,8 +179,7 @@ subscribe(Connection, Destination, Id, Headers) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#UNSUBSCRIBE).
 
 unsubscribe(Connection, Id) :-
-    create_frame('UNSUBSCRIBE', _{id:Id}, '', Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, unsubscribe, _{id:Id}).
 
 %% ack(+Connection, +MessageId, +Headers) is semidet.
 %
@@ -188,8 +187,7 @@ unsubscribe(Connection, Id) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#ACK).
 
 ack(Connection, MessageId, Headers) :-
-    create_frame('ACK', Headers.put('message-id', MessageId), '', Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, ack, Headers.put('message-id', MessageId)).
 
 %% nack(+Connection, +MessageId, +Headers) is semidet.
 %
@@ -197,8 +195,7 @@ ack(Connection, MessageId, Headers) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#NACK).
 
 nack(Connection, MessageId, Headers) :-
-    create_frame('NACK', Headers.put('message-id', MessageId), '', Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, nack, Headers.put('message-id', MessageId)).
 
 %% begin(+Connection, +Transaction) is semidet.
 %
@@ -206,8 +203,7 @@ nack(Connection, MessageId, Headers) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#BEGIN).
 
 begin(Connection, Transaction) :-
-    create_frame('BEGIN', _{transaction:Transaction}, '', Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, begin, _{transaction:Transaction}).
 
 %% commit(+Connection, +Transaction) is semidet.
 %
@@ -215,8 +211,7 @@ begin(Connection, Transaction) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#COMMIT).
 
 commit(Connection, Transaction) :-
-    create_frame('COMMIT', _{transaction:Transaction}, '', Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, commit, _{transaction:Transaction}).
 
 %% abort(+Connection, +Transaction) is semidet.
 %
@@ -224,8 +219,7 @@ commit(Connection, Transaction) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#ABORT).
 
 abort(Connection, Transaction) :-
-    create_frame('ABORT', _{transaction:Transaction}, '', Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, abort, _{transaction:Transaction}).
 
 %% disconnect(+Connection, +Headers) is semidet.
 %
@@ -233,47 +227,76 @@ abort(Connection, Transaction) :-
 % See [here](http://stomp.github.io/stomp-specification-1.1.html#DISCONNECT).
 
 disconnect(Connection, Headers) :-
-    create_frame('DISCONNECT', Headers, '', Frame),
-    send0(Connection, Frame).
+    send_frame(Connection, disconnect, Headers).
 
-send0(Connection, Frame) :-
-    send0(Connection, Frame, true).
+%!  send_frame(+Connection, +Command, +Headers) is det.
+%!  send_frame(+Connection, +Command, +Headers, +Body) is det.
 
-send0(Connection, Frame, EndWithNull) :-
-    (   EndWithNull
-    ->  atom_concat(Frame, '\x00', Frame1)
-    ;   Frame1 = Frame
-    ),
-    debug(stompl(send), 'frame to send~n~w', [Frame1]),
+send_frame(Connection, Command, Headers) :-
+    assertion(\+has_body(Command)),
+    send_frame(Connection, Command, Headers).
+
+send_frame(Connection, Command, Headers, Body) :-
+    has_body(Command),
+    !,
     get_mapping_data(Connection, stream, Stream),
-    format(Stream, '~w', [Frame1]),
-    flush_output(Stream).
+    default_content_type('text/plain', Headers, Headers1),
+    body_bytes(Body, ContentLength),
+    Headers2 = Headers1.put('content-length', ContentLength),
+    send_command(Stream, Command),
+    send_header(Stream, Headers2),
+    format(Stream, '~w\u0000\n', [Body]).
+send_frame(Connection, Command, Headers, _Body) :-
+    get_mapping_data(Connection, stream, Stream),
+    send_command(Stream, Command),
+    send_header(Stream, Headers).
 
-create_frame(Command, Headers, Body, Frame) :-
-    (   Body \= ''
-    ->  atom_length(Body, Length),
-        atom_number(Length1, Length),
-        Headers1 = Headers.put('content-length', Length1),
-        (   \+ _ = Headers1.get('content-type')
-        ->  Headers2 = Headers1.put('content-type', 'text/plain')
-        ;   Headers2 = Headers1
-        )
-    ;   Headers2 = Headers
-    ),
-    create_header_lines(Headers2, HeaderLines),
-    (   HeaderLines \= ''
-    ->  atomic_list_concat([Command, HeaderLines], '\n', WithoutBody)
-    ;   WithoutBody = Command
-    ),
-    atomic_list_concat([WithoutBody, Body], '\n\n', Frame).
+send_command(Stream, Command) :-
+    string_upper(Command, Upper),
+    format(Stream, '~w\n', [Upper]).
 
-create_header_lines(Headers, HeaderLines) :-
+send_header(Stream, Headers) :-
     dict_pairs(Headers, _, Pairs),
-    maplist(create_header_line, Pairs, HeaderLines0),
-    atomic_list_concat(HeaderLines0, '\n', HeaderLines).
+    maplist(send_header_line(Stream), Pairs),
+    nl(Stream).
 
-create_header_line(K-V, HeaderLine) :-
-    atomic_list_concat([K, V], ':', HeaderLine).
+send_header_line(Stream, Name-Value) :-
+    (   integer(Value)
+    ->  format(Stream, '~w:~w\n', [Name,Value])
+    ;   escape_value(Value, String),
+        format(Stream, '~w:~w\n', [Name,String])
+    ).
+
+escape_value(Value, String) :-
+    split_string(Value, "\n:\\", "", [_]),
+    !,
+    String = Value.
+escape_value(Value, String) :-
+    string_codes(Value, Codes),
+    phrase(escape(Codes), Encoded),
+    string_codes(String, Encoded).
+
+escape([]) --> [].
+escape([H|T]) --> esc(H), escape(T).
+
+esc(0'\n) --> !, "\\n".
+esc(0':)  --> !, "\\:".
+esc(0'\\) --> !, "\\\\".
+esc(C)    --> [C].
+
+default_content_type(ContentType, Header0, Header) :-
+    (   get_dict('content-type', Header0, _)
+    ->  Header = Header0
+    ;   put_dict('content-type', Header0, ContentType, Header)
+    ).
+
+body_bytes(String, Bytes) :-
+    setup_call_cleanup(
+        open_null_stream(Out),
+        ( write(Out, String),
+          byte_count(Out, Bytes)
+        ),
+        close(Out)).
 
 
 		 /*******************************
