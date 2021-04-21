@@ -1,20 +1,19 @@
 :- module(stompl,
-          [ connection/2,    % +Address, -Connection
-            connection/3,    % +Address, +CallbackDict, -Connection
-            setup/1,         % +Connection
-            teardown/1,      % +Connection
-            connect/3,       % +Connection, +Host, +Headers
-            send/3,          % +Connection, +Destination, +Headers
-            send/4,          % +Connection, +Destination, +Headers, +Body
-            send_json/4,     % +Connection, +Destination, +Headers, +JSON
-            subscribe/4,     % +Connection, +Destination, +Id, +Headers
-            unsubscribe/2,   % +Connection, +Id
-            ack/3,           % +Connection, +MessageId, +Headers
-            nack/3,          % +Connection, +MessageId, +Headers
-            begin/2,         % +Connection, +Transaction
-            commit/2,        % +Connection, +Transaction
-            abort/2,         % +Connection, +Transaction
-            disconnect/2     % +Connection, +Headers
+          [ stomp_connection/3,    % +Address, +CallbackDict, -Connection
+            stomp_setup/1,         % +Connection
+            stomp_teardown/1,      % +Connection
+            stomp_connect/3,       % +Connection, +Host, +Headers
+            stomp_send/3,          % +Connection, +Destination, +Headers
+            stomp_send/4,          % +Connection, +Destination, +Headers, +Body
+            stomp_send_json/4,     % +Connection, +Destination, +Headers, +JSON
+            stomp_subscribe/4,     % +Connection, +Destination, +Id, +Headers
+            stomp_unsubscribe/2,   % +Connection, +Id
+            stomp_ack/3,           % +Connection, +MessageId, +Headers
+            stomp_nack/3,          % +Connection, +MessageId, +Headers
+            stomp_begin/2,         % +Connection, +Transaction
+            stomp_commit/2,        % +Connection, +Transaction
+            stomp_abort/2,         % +Connection, +Transaction
+            stomp_disconnect/2     % +Connection, +Headers
           ]).
 
 /** <module> STOMP client.
@@ -30,7 +29,7 @@ is used as a reference for the implementation.
 */
 
 :- meta_predicate
-    connection(+,:,-).
+    stomp_connection(+,:,-).
 
 :- use_module(library(uuid)).
 :- use_module(library(socket)).
@@ -43,8 +42,7 @@ is used as a reference for the implementation.
 :- dynamic
     connection_mapping/2.
 
-%!  connected(+Address, -Connected) is det.
-%!  connected(+Address, +CallbackDict, -Connected) is det.
+%!  stomp_connection(+Address, +CallbackDict, -Connected) is det.
 %
 %   Create a connection reference. The connection is   not set up yet by
 %   this predicate. If CallbackDict is provided,   it will be associated
@@ -67,10 +65,7 @@ is used as a reference for the implementation.
 %     - on_error:Closure
 %       Called as call(Closure, Connection, Header, Body)
 
-connection(Address, Connection) :-
-    connection(Address, Connection, _{}).
-
-connection(Address, Module:CallbackDict, Connection) :-
+stomp_connection(Address, Module:CallbackDict, Connection) :-
     uuid(Connection),
     qualify_callbacks(Module, CallbackDict, CallbackDictQ),
     asserta(connection_mapping(Connection,
@@ -86,11 +81,11 @@ qualify_callbacks(Module, Dict, DictQ) :-
 qualify_callback(Module, Name-Value, Name-(M:Plain)) :-
     strip_module(Module:Value, M, Plain).
 
-%!  setup(+Connection) is det.
+%!  stomp_setup(+Connection) is det.
 %
 %   Set up the actual socket connection and start receiving thread.
 
-setup(Connection) :-
+stomp_setup(Connection) :-
     get_mapping_data(Connection, address, Address),
     tcp_connect(Address, Stream, []),
     gensym(stompl_receive, Alias),
@@ -101,12 +96,12 @@ setup(Connection) :-
                                  stream:Stream
                                }).
 
-%!  teardown(+Connection) is semidet.
+%!  stomp_teardown(+Connection) is semidet.
 %
 %   Tear down the socket connection, stop receiving thread and heartbeat
 %   thread (if applicable).
 
-teardown(Connection) :-
+stomp_teardown(Connection) :-
     terminate_helper(Connection, receiver_thread_id),
     terminate_helper(Connection, heartbeat_thread_id),
     get_mapping_data(Connection, stream, Stream),
@@ -123,7 +118,7 @@ terminate_helper(Connection, Helper) :-
 terminate_helper(_, _).
 
 
-%!  connect(+Connectio, +Host, +Headers) is det.
+%!  stomp_connect(+Connectio, +Host, +Headers) is det.
 %
 %   Send a ``CONNECT`` frame. Protocol version and heartbeat negotiation
 %   will  be  handled.  ``STOMP``  frame  is    not  used  for  backward
@@ -132,7 +127,7 @@ terminate_helper(_, _).
 %   @see http://stomp.github.io/stomp-specification-1.1.html#CONNECT_or_STOMP_Frame).
 %   @tbd 1.2 doesn't bring much benefit but trouble
 
-connect(Connection, Host, Headers) :-
+stomp_connect(Connection, Host, Headers) :-
     send_frame(Connection,
                connect,
                Headers.put(_{ 'accept-version':'1.0,1.1',
@@ -144,8 +139,8 @@ connect(Connection, Host, Headers) :-
     ).
 
 
-%!  send(+Connection, +Destination, +Headers) is det.
-%!  send(+Connection, +Destination, +Headers, +Body) is det.
+%!  stomp_send(+Connection, +Destination, +Headers) is det.
+%!  stomp_send(+Connection, +Destination, +Headers, +Body) is det.
 %
 %   Send  a  ``SEND``  frame.  If   ``content-type``  is  not  provided,
 %   ``text/plain`` will be used. ``content-length``   will  be filled in
@@ -153,13 +148,13 @@ connect(Connection, Host, Headers) :-
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#SEND
 
-send(Connection, Destination, Headers) :-
-    send(Connection, Destination, Headers).
+stomp_send(Connection, Destination, Headers) :-
+    stomp_send(Connection, Destination, Headers).
 
-send(Connection, Destination, Headers, Body) :-
+stomp_send(Connection, Destination, Headers, Body) :-
     send_frame(Connection, send, Headers.put(destination, Destination), Body).
 
-%!  send_json(+Connection, +Destination, +Headers, +JSON) is det.
+%!  stomp_send_json(+Connection, +Destination, +Headers, +JSON) is det.
 %
 %   Send a ``SEND`` frame. ``JSON`` can be either a JSON term or a dict.
 %   ``content-type`` is filled in  automatically as ``application/json``
@@ -167,7 +162,7 @@ send(Connection, Destination, Headers, Body) :-
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#SEND
 
-send_json(Connection, Destination, Headers, JSON) :-
+stomp_send_json(Connection, Destination, Headers, JSON) :-
     atom_json_term(Body, JSON, [as(string)]),
     send_frame(Connection, send,
                Headers.put(_{ destination:Destination,
@@ -175,76 +170,76 @@ send_json(Connection, Destination, Headers, JSON) :-
                             }),
                Body).
 
-%!  subscribe(+Connection, +Destination, +Id, +Headers) is det.
+%!  stomp_subscribe(+Connection, +Destination, +Id, +Headers) is det.
 %
 %   Send a ``SUBSCRIBE`` frame.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#SUBSCRIBE
 
-subscribe(Connection, Destination, Id, Headers) :-
+stomp_subscribe(Connection, Destination, Id, Headers) :-
     send_frame(Connection, subscribe,
                Headers.put(_{destination:Destination, id:Id})).
 
-%!  unsubscribe(+Connection, +Id) is det.
+%!  stomp_unsubscribe(+Connection, +Id) is det.
 %
 %   Send an ``UNSUBSCRIBE`` frame.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#UNSUBSCRIBE
 
-unsubscribe(Connection, Id) :-
+stomp_unsubscribe(Connection, Id) :-
     send_frame(Connection, unsubscribe, _{id:Id}).
 
-%!  ack(+Connection, +MessageId, +Headers) is det.
+%!  stomp_ack(+Connection, +MessageId, +Headers) is det.
 %
 %   Send an ``ACK`` frame.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#ACK
 
-ack(Connection, MessageId, Headers) :-
+stomp_ack(Connection, MessageId, Headers) :-
     send_frame(Connection, ack, Headers.put('message-id', MessageId)).
 
-%!  nack(+Connection, +MessageId, +Headers) is det.
+%!  stomp_nack(+Connection, +MessageId, +Headers) is det.
 %
 %   Send a ``NACK`` frame.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#NACK
 
-nack(Connection, MessageId, Headers) :-
+stomp_nack(Connection, MessageId, Headers) :-
     send_frame(Connection, nack, Headers.put('message-id', MessageId)).
 
-%!  begin(+Connection, +Transaction) is det.
+%!  stomp_begin(+Connection, +Transaction) is det.
 %
 %   Send a ``BEGIN`` frame.
 %   @see http://stomp.github.io/stomp-specification-1.1.html#BEGIN
 
-begin(Connection, Transaction) :-
+stomp_begin(Connection, Transaction) :-
     send_frame(Connection, begin, _{transaction:Transaction}).
 
-%!  commit(+Connection, +Transaction) is det.
+%!  stomp_commit(+Connection, +Transaction) is det.
 %
 %   Send a ``COMMIT`` frame.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#COMMIT
 
-commit(Connection, Transaction) :-
+stomp_commit(Connection, Transaction) :-
     send_frame(Connection, commit, _{transaction:Transaction}).
 
-%!  abort(+Connection, +Transaction) is det.
+%!  stomp_abort(+Connection, +Transaction) is det.
 %
 %   Send a ``ABORT`` frame.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#ABORT
 
-abort(Connection, Transaction) :-
+stomp_abort(Connection, Transaction) :-
     send_frame(Connection, abort, _{transaction:Transaction}).
 
-%!  disconnect(+Connection, +Headers) is det.
+%!  stomp_disconnect(+Connection, +Headers) is det.
 %
 %   Send a ``DISCONNECT`` frame.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#DISCONNECT
 
-disconnect(Connection, Headers) :-
+stomp_disconnect(Connection, Headers) :-
     send_frame(Connection, disconnect, Headers).
 
 %!  send_frame(+Connection, +Command, +Headers) is det.
