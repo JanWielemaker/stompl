@@ -88,50 +88,51 @@ qualify_callbacks(Module, Dict, DictQ) :-
 qualify_callback(Module, Name-Value, Name-(M:Plain)) :-
     strip_module(Module:Value, M, Plain).
 
-%% setup(+Connection) is semidet.
+%!  setup(+Connection) is det.
 %
-% Set up the actual socket connection and start
-% receiving thread.
+%   Set up the actual socket connection and start receiving thread.
 
 setup(Connection) :-
     get_mapping_data(Connection, address, Address),
     tcp_connect(Address, Stream, []),
-    set_stream(Stream, buffer_size(4096)),
-    thread_create(receive(Connection, Stream), ReceiverThreadId, []),
-    update_connection_mapping(Connection, _{receiver_thread_id: ReceiverThreadId, stream:Stream}).
+    gensym(stompl_receive, Alias),
+    thread_create(receive(Connection, Stream), ReceiverThreadId, [alias(Alias)]),
+    debug(stompl(connection), 'Handling input on thread ~p', [ReceiverThreadId]),
+    update_connection_mapping(Connection,
+                              _{ receiver_thread_id: ReceiverThreadId,
+                                 stream:Stream
+                               }).
 
-%% teardown(+Connection) is semidet.
+%!  teardown(+Connection) is semidet.
 %
-% Tear down the socket connection, stop receiving
-% thread and heartbeat thread (if applicable).
+%   Tear down the socket connection, stop receiving thread and heartbeat
+%   thread (if applicable).
 
 teardown(Connection) :-
-    get_mapping_data(Connection, receiver_thread_id, ReceiverThreadId),
-    (   \+ thread_self(ReceiverThreadId),
-        thread_property(ReceiverThreadId, status(running))
-    ->  debug(stompl(connection), 'attempting to kill receive thread ~w', [ReceiverThreadId]),
-        thread_signal(ReceiverThreadId, throw(kill))
-    ;   true
-    ),
-    (   get_mapping_data(Connection, heartbeat_thread_id, HeartbeatThreadId)
-    ->  (   thread_property(HeartbeatThreadId, status(running))
-        ->  debug(stompl(connection), 'attempting to kill heartbeat thread ~w', [HeartbeatThreadId]),
-            thread_signal(HeartbeatThreadId, throw(kill))
-        )
-    ),
+    terminate_helper(Connection, receiver_thread_id),
+    terminate_helper(Connection, heartbeat_thread_id),
     get_mapping_data(Connection, stream, Stream),
-    catch(close(Stream), _, true), %% close it anyway
+    close(Stream, [force(true)]),
     debug(stompl(connection), 'retract connection mapping', []),
     retract(connection_mapping(Connection, _)).
 
-%% connect(+Connectio, +Host, +Headers) is semidet.
+terminate_helper(Connection, Helper) :-
+    get_mapping_data(Connection, Helper, Thread),
+    \+ thread_self(Thread),
+    catch(thread_signal(Thread, throw(kill)), error(_,_), fail),
+    !,
+    thread_join(Thread, _Status).
+terminate_helper(_, _).
+
+
+%!  connect(+Connectio, +Host, +Headers) is det.
 %
-% Send a =CONNECT= frame. Protocol version and heartbeat
-% negotiation will be handled. =STOMP= frame is not used
-% for backward compatibility.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#CONNECT_or_STOMP_Frame).
+%   Send a ``CONNECT`` frame. Protocol version and heartbeat negotiation
+%   will  be  handled.  ``STOMP``  frame  is    not  used  for  backward
+%   compatibility.
 %
-% %% 1.2 doesn't bring much benefit but trouble
+%   @see http://stomp.github.io/stomp-specification-1.1.html#CONNECT_or_STOMP_Frame).
+%   @tbd 1.2 doesn't bring much benefit but trouble
 
 connect(Connection, Host, Headers) :-
     send_frame(Connection,
@@ -160,12 +161,13 @@ send(Connection, Destination, Headers) :-
 send(Connection, Destination, Headers, Body) :-
     send_frame(Connection, send, Headers.put(destination, Destination), Body).
 
-%% send_json(+Connection, +Destination, +Headers, +JSON) is semidet.
+%!  send_json(+Connection, +Destination, +Headers, +JSON) is det.
 %
-% Send a =SEND= frame. =JSON= can be either a JSON term or a dict.
-% =content-type= is filled in automatically as =application/json=
-% and =content-length= will be filled in automatically as well.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#SEND).
+%   Send a ``SEND`` frame. ``JSON`` can be either a JSON term or a dict.
+%   ``content-type`` is filled in  automatically as ``application/json``
+%   and ``content-length`` will be filled in automatically as well.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#SEND
 
 send_json(Connection, Destination, Headers, JSON) :-
     atom_json_term(Body, JSON, [as(string)]),
@@ -175,67 +177,74 @@ send_json(Connection, Destination, Headers, JSON) :-
                             }),
                Body).
 
-%% subscribe(+Connection, +Destination, +Id, +Headers) is semidet.
+%!  subscribe(+Connection, +Destination, +Id, +Headers) is det.
 %
-% Send a =SUBSCRIBE= frame.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#SUBSCRIBE).
+%   Send a ``SUBSCRIBE`` frame.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#SUBSCRIBE
 
 subscribe(Connection, Destination, Id, Headers) :-
     send_frame(Connection, subscribe,
                Headers.put(_{destination:Destination, id:Id})).
 
-%% unsubscribe(+Connection, +Id) is semidet.
+%!  unsubscribe(+Connection, +Id) is det.
 %
-% Send an =UNSUBSCRIBE= frame.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#UNSUBSCRIBE).
+%   Send an ``UNSUBSCRIBE`` frame.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#UNSUBSCRIBE
 
 unsubscribe(Connection, Id) :-
     send_frame(Connection, unsubscribe, _{id:Id}).
 
-%% ack(+Connection, +MessageId, +Headers) is semidet.
+%!  ack(+Connection, +MessageId, +Headers) is det.
 %
-% Send an =ACK= frame.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#ACK).
+%   Send an ``ACK`` frame.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#ACK
 
 ack(Connection, MessageId, Headers) :-
     send_frame(Connection, ack, Headers.put('message-id', MessageId)).
 
-%% nack(+Connection, +MessageId, +Headers) is semidet.
+%!  nack(+Connection, +MessageId, +Headers) is det.
 %
-% Send a =NACK= frame.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#NACK).
+%   Send a ``NACK`` frame.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#NACK
 
 nack(Connection, MessageId, Headers) :-
     send_frame(Connection, nack, Headers.put('message-id', MessageId)).
 
-%% begin(+Connection, +Transaction) is semidet.
+%!  begin(+Connection, +Transaction) is det.
 %
-% Send a =BEGIN= frame.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#BEGIN).
+%   Send a ``BEGIN`` frame.
+%   @see http://stomp.github.io/stomp-specification-1.1.html#BEGIN
 
 begin(Connection, Transaction) :-
     send_frame(Connection, begin, _{transaction:Transaction}).
 
-%% commit(+Connection, +Transaction) is semidet.
+%!  commit(+Connection, +Transaction) is det.
 %
-% Send a =COMMIT= frame.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#COMMIT).
+%   Send a ``COMMIT`` frame.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#COMMIT
 
 commit(Connection, Transaction) :-
     send_frame(Connection, commit, _{transaction:Transaction}).
 
-%% abort(+Connection, +Transaction) is semidet.
+%!  abort(+Connection, +Transaction) is det.
 %
-% Send a =ABORT= frame.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#ABORT).
+%   Send a ``ABORT`` frame.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#ABORT
 
 abort(Connection, Transaction) :-
     send_frame(Connection, abort, _{transaction:Transaction}).
 
-%% disconnect(+Connection, +Headers) is semidet.
+%!  disconnect(+Connection, +Headers) is det.
 %
-% Send a =DISCONNECT= frame.
-% See [here](http://stomp.github.io/stomp-specification-1.1.html#DISCONNECT).
+%   Send a ``DISCONNECT`` frame.
+%
+%   @see http://stomp.github.io/stomp-specification-1.1.html#DISCONNECT
 
 disconnect(Connection, Headers) :-
     send_frame(Connection, disconnect, Headers).
@@ -475,9 +484,10 @@ start_heartbeat(Connection, CHB, SHB) :-
         )
     ),
     get_time(Now),
+    gensym(stompl_heartbeat, Alias),
     thread_create(heartbeat_loop(Connection, SendSleep, ReceiveSleep,
                                  SleepTime, Now),
-                  HeartbeatThreadId, []),
+                  HeartbeatThreadId, [alias(Alias)]),
     update_connection_mapping(Connection,
                               _{
                                 heartbeat_thread_id:HeartbeatThreadId,
