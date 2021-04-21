@@ -33,6 +33,9 @@ is used as a reference for the implementation.
 :- use_module(library(socket)).
 :- use_module(library(apply)).
 :- use_module(library(http/json)).
+:- use_module(library(debug)).
+:- use_module(library(readutil)).
+:- use_module(library(http/http_stream)).
 
 :- dynamic
     connection_mapping/2.
@@ -272,129 +275,127 @@ create_header_lines(Headers, HeaderLines) :-
 create_header_line(K-V, HeaderLine) :-
     atomic_list_concat([K, V], ':', HeaderLine).
 
+
+		 /*******************************
+		 *        INCOMING DATA		*
+		 *******************************/
+
+%!  read_frame(+Stream, -Frame) is det.
+%
+%   Read a frame from a STOMP stream.   On end-of-file, Frame is unified
+%   with the atom `end_of_file`. Otherwise  it   is  a  dict holding the
+%   `cmd`, `headers` (another dict) and `body` (a string)
+
+read_frame(Stream, Frame) :-
+    read_command(Stream, Command),
+    (   Command == end_of_file
+    ->  Frame = end_of_file
+    ;   Command == heartbeat
+    ->  Frame = stomp_frame{cmd:heartbeat}
+    ;   read_header(Stream, Header),
+        (   has_body(Command)
+        ->  read_content(Stream, Header, Content),
+            Frame = stomp_frame{cmd:Command, headers:Header, body:Content}
+        ;   Frame = stomp_frame{cmd:Command, headers:Header}
+        )
+    ).
+
+has_body(send).
+has_body(message).
+has_body(error).
+
+read_command(Stream, Command) :-
+    read_line_to_string(Stream, String),
+    debug(stompl(command), 'Got line ~p', [String]),
+    (   String == end_of_file
+    ->  Command = end_of_file
+    ;   String == ""
+    ->  Command = heartbeat
+    ;   string_lower(String, Lwr),
+        atom_string(Command, Lwr)
+    ).
+
+read_header(Stream, Header) :-
+    read_header_lines(Stream, Pairs, []),
+    dict_pairs(Header, stomp_header, Pairs).
+
+read_header_lines(Stream, Header, Seen) :-
+    read_line_to_string(Stream, Line),
+    (   Line == ""
+    ->  Header = []
+    ;   sub_string(Line, Before, _, After, ":")
+    ->  sub_atom(Line, 0, Before, _, Name),
+        (   memberchk(Name, Seen)
+        ->  read_header_lines(Stream, Header, Seen)
+        ;   sub_string(Line, _, After, 0, Value0),
+            convert_value(Name, Value0, Value),
+            Header = [Name-Value|More],
+            read_header_lines(Stream, More, [Name|Seen])
+        )
+    ).
+
+convert_value('content-length', String, Bytes) :-
+    !,
+    number_string(Bytes, String).
+convert_value(_, String, Value) :-
+    unescape_header_value(String, Value).
+
+unescape_header_value(String, Value) :-
+    sub_atom(String, _, _, _, "\\"),
+    !,
+    string_codes(String, Codes),
+    phrase(unescape(Plain), Codes),
+    string_codes(Value, Plain).
+unescape_header_value(String, String).
+
+unescape([H|T]) --> "\\", !, unesc(H), unescape(T).
+unescape([H|T]) --> [H], !, unescape(T).
+unescape([]) --> [].
+
+unesc(0'\n) --> "n", !.
+unesc(0':)  --> "c", !.
+unesc(0'\\) --> "\\", !.
+unesc(_) --> [C], { syntax_error(invalid_stomp_escape(C)) }.
+
+%!  read_content(+Stream, +Header, -Content) is det.
+%
+%   Read the body. Note that the body   may  be followed by an arbitrary
+%   number of newlines. We leave them in place to avoid blocking.
+
+read_content(Stream, Header, Content) :-
+    Bytes = Header.'content-length',
+    !,
+    setup_call_cleanup(
+        stream_range_open(Stream, DataStream, [size(Bytes)]),
+        read_string(DataStream, _, Content),
+        close(DataStream)).
+
+%!  receive(+Connection, +Stream) is det.
+%
+%   Read and process incoming messages from Stream.
+
 receive(Connection, Stream) :-
-    receive0(Connection, Stream, '').
-
-receive0(Connection, Stream, Buffered) :-
-    (   catch(receive_frames(Stream, Frames, Buffered, Buffered1), E, true)
-    ->  (   nonvar(E)
-        ->  E = exception(disconnected),
-            debug(stompl(connection), 'disconnected', []),
-            notify(Connection, disconnected)
-        ;   debug(stompl(message), 'frames received~n~w', [Frames]),
-            handle_frames(Connection, Frames),
-            debug(stompl(message), 'frames handled', []),
-            receive0(Connection, Stream, Buffered1)
+    E = error(Formal, _),
+    catch(read_frame(Stream, Frame), E, true),
+    (   var(Formal)
+    ->  debug(stompl(heartbeat), 'received frame ~p', [Frame]),
+        !,
+        (   Frame == end_of_file
+        ->  notify(Connection, disconnected)
+        ;   process_frame(Connection, Frame),
+            receive(Connection, Stream)
         )
+    ;   print_message(warning, E),
+        notify(Connection, disconnected),
+        debug(stompl(connection), 'Receiver thread died', []),
+        thread_self(Me),
+        thread_detach(Me)
     ).
-
-receive_frames(Stream, Frames, Buffered0, Buffered) :-
-    (   at_end_of_stream(Stream)
-    ->  throw(exception(disconnected))
-    ;   read_pending_input(Stream, Codes, [])
-    ),
-    atom_codes(Chars, Codes),
-    debug(stompl(frame), 'received~n~w', [Chars]),
-    (   Chars = '\x0a'
-    ->  Buffered = Buffered0,
-        Frames = [Chars]
-    ;   atom_concat(Buffered0, Chars, Buffered1),
-        debug(stompl(frame), 'current buffer~n~w', [Buffered1]),
-        extract_frames(Frames, Buffered1, Buffered)
-    ).
-
-extract_frames(Frames, Buffered0, Buffered) :-
-    extract_frames0([], Frames0, Buffered0, Buffered),
-    reverse(Frames0, Frames).
-
-extract_frames0(Frames, Frames, '', '') :- !.
-extract_frames0(Frames, Frames, Buffered, Buffered) :-
-    \+ sub_atom(Buffered, _, 1, _, '\x00'), !.
-extract_frames0(Frames0, Frames, Buffered0, Buffered) :-
-    sub_atom(Buffered0, FrameLength, 1, _, '\x00'), !,
-    sub_atom(Buffered0, 0, FrameLength, _, Frame),
-    (  sub_atom(Frame, PreambleLength, 2, _, '\n\n'), !
-    -> (   check_frame(Frame, Buffered0, FrameLength, PreambleLength, Frame1, Buffered1)
-       ->  Frames1 = [Frame1|Frames0],
-           extract_frames0(Frames1, Frames, Buffered1, Buffered)
-       ;   Frames = Frames0,
-           Buffered = Buffered0
-       )
-    ;  Frames1 = [Frame|Frames0],
-       Length is FrameLength + 1,
-       sub_atom(Buffered0, Length, _, 0, Buffered1),
-       extract_frames0(Frames1, Frames, Buffered1, Buffered)
-    ).
-
-check_frame(Frame0, Buffered0, FrameLength, PreambleLength, Frame, Buffered) :-
-    (   read_content_length(Frame0, ContentLength)
-    ->  ContentOffset is PreambleLength + 2,
-        FrameSize is ContentOffset + ContentLength,
-        (   FrameSize > FrameLength
-        ->  atom_length(Buffered0, Length),
-            (   FrameSize < Length
-            ->  sub_atom(Buffered0, 0, FrameSize, _, Frame),
-                Length is FrameSize + 1,
-                sub_atom(Buffered0, Length, _, 0, Buffered)
-            )
-        ;   Frame = Frame0,
-            Length is FrameLength + 1,
-            sub_atom(Buffered0, Length, _, 0, Buffered)
-        )
-    ;   Frame = Frame0,
-        Length is FrameLength + 1,
-        sub_atom(Buffered0, Length, _, 0, Buffered)
-    ).
-
-read_content_length(Frame, Length) :-
-    atomic_list_concat([_, Frame1], 'content-length:', Frame),
-    atomic_list_concat([Length0|_], '\n', Frame1),
-    atomic_list_concat(L, ' ', Length0),
-    last(L, Length1),
-    atom_number(Length1, Length).
-
-handle_frames(_, []) :- !.
-handle_frames(Connection, [H|T]) :-
-    parse_frame(H, ParsedFrame),
-    debug(stompl(frame), 'parsed frame~n~w', [ParsedFrame]),
-    process_frame(Connection, ParsedFrame),
-    handle_frames(Connection, T).
-
-parse_frame('\x0a', _{cmd:heartbeat}) :- !.
-parse_frame(Frame, ParsedFrame) :-
-    sub_atom(Frame, PreambleLength, 2, _, '\n\n'), !,
-    sub_atom(Frame, 0, PreambleLength, _, Preamble),
-    Begin is PreambleLength + 2,
-    sub_atom(Frame, Begin, _, 0, Body),
-    parse_headers(Preamble, Command, Headers),
-    ParsedFrame = _{cmd:Command, headers:Headers, body:Body}.
-
-parse_headers(Preamble, Command, Headers) :-
-    atomic_list_concat([Command|PreambleLines], '\n', Preamble),
-    parse_headers0(PreambleLines, _{}, Headers).
-
-parse_headers0([], Headers, Headers) :- !.
-parse_headers0([H|T], Headers0, Headers) :-
-    atomic_list_concat([Key0, Value0], ':', H),
-    replace(Key0, Key),
-    (   \+ Headers0.get(Key) %% repeated hearder entries, only the first one should be used
-    ->  sub_atom(Value0, _, _, 0, Value1),
-        \+ sub_atom(Value1, 0, 1, _, ' '), !,
-        replace(Value1, Value),
-        Headers1 = Headers0.put(Key, Value)
-    ;   Headers1 = Headers0
-    ),
-    parse_headers0(T, Headers1, Headers).
-
-replace(A0, A) :-
-    atomic_list_concat(L0, '\\n', A0),
-    atomic_list_concat(L0, '\n', A1),
-    atomic_list_concat(L1, '\\r', A1),
-    atomic_list_concat(L1, '\r', A2),
-    atomic_list_concat(L2, '\\\\', A2),
-    atomic_list_concat(L2, '\\', A3),
-    atomic_list_concat(L3, '\\c', A3),
-    atomic_list_concat(L3, ':', A).
+receive(Connection, _Stream) :-
+    notify(Connection, disconnected),
+    debug(stompl(connection), 'Receiver thread finished', []),
+    thread_self(Me),
+    thread_detach(Me).
 
 process_frame(Connection, Frame) :-
     Frame.cmd = heartbeat, !,
@@ -402,8 +403,8 @@ process_frame(Connection, Frame) :-
     debug(stompl(heartbeat), 'received heartbeat at ~w', [Now]),
     update_connection_mapping(Connection, _{received_heartbeat:Now}).
 process_frame(Connection, Frame) :-
-    downcase_atom(Frame.cmd, FrameType),
-    (   FrameType = connected
+    FrameType = Frame.cmd,
+    (   FrameType == connected
     ->  start_heartbeat_if_required(Connection, Frame.headers)
     ;   true
     ),
@@ -432,7 +433,8 @@ start_heartbeat(Connection, CHB, SHB) :-
         )
     ),
     get_time(Now),
-    thread_create(heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, Now),
+    thread_create(heartbeat_loop(Connection, SendSleep, ReceiveSleep,
+                                 SleepTime, Now),
                   HeartbeatThreadId, []),
     update_connection_mapping(Connection,
                               _{
@@ -442,11 +444,9 @@ start_heartbeat(Connection, CHB, SHB) :-
 start_heartbeat(_, _, _).
 
 extract_heartbeats(Heartbeat, X, Y) :-
-    atomic_list_concat(L, ' ', Heartbeat),
-    atomic_list_concat(L, '', Heartbeat1),
-    atomic_list_concat([X0, Y0], ',', Heartbeat1),
-    atom_number(X0, X),
-    atom_number(Y0, Y).
+    split_string(Heartbeat, ",", " ", [XS, YS]),
+    number_string(X, XS),
+    number_string(Y, YS).
 
 calculate_heartbeats(CX-CY, SX-SY, X-Y) :-
     (   CX \= 0, SY \= 0
@@ -478,12 +478,15 @@ heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime) :-
     ),
     heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime1).
 
+%!  notify(+Connection, +FrameType) is det.
+%!  notify(+Connection, +FrameType, +Frame) is det.
+
 notify(Connection, FrameType) :-
     get_mapping_data(Connection, callbacks, CallbackDict),
     atom_concat(on_, FrameType, Key),
     (   Predicate = CallbackDict.get(Key)
     ->  debug(stompl(callback), 'callback predicate ~w', [Predicate]),
-        ignore(call(Predicate, Connection))
+        callback(Predicate, Connection)
     ;   true
     ).
 
@@ -492,7 +495,38 @@ notify(Connection, FrameType, Frame) :-
     atom_concat(on_, FrameType, Key),
     (   Predicate = CallbackDict.get(Key)
     ->  debug(stompl(callback), 'callback predicate ~w', [Predicate]),
-        ignore(call(Predicate, Connection, Frame.headers, Frame.body))
+        (   has_body(FrameType)
+        ->  callback(Predicate, Connection, Frame.headers, Frame.body)
+        ;   callback(Predicate, Connection, Frame.headers)
+        )
+    ;   true
+    ).
+
+callback(Pred, Connection) :-
+    Error = error(_,_),
+    (   catch_with_backtrace(
+            call(Pred, Connection),
+            Error,
+            print_message(warning, Error))
+    ->  true
+    ;   true
+    ).
+callback(Pred, Connection, Headers) :-
+    Error = error(_,_),
+    (   catch_with_backtrace(
+            call(Pred, Connection, Headers),
+            Error,
+            print_message(warning, Error))
+    ->  true
+    ;   true
+    ).
+callback(Pred, Connection, Headers, Body) :-
+    Error = error(_,_),
+    (   catch_with_backtrace(
+            call(Pred, Connection, Headers, Body),
+            Error,
+            print_message(warning, Error))
+    ->  true
     ;   true
     ).
 
