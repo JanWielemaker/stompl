@@ -1,8 +1,9 @@
 :- module(stompl,
-          [ stomp_connection/3,    % +Address, +CallbackDict, -Connection
+          [ stomp_connection/5,    % +Address, +Host, +Headers,
+                                   % :Callback, -Connection
             stomp_setup/1,         % +Connection
             stomp_teardown/1,      % +Connection
-            stomp_connect/3,       % +Connection, +Host, +Headers
+            stomp_connect/1,       % +Connection
             stomp_send/4,          % +Connection, +Destination, +Headers, +Body
             stomp_send_json/4,     % +Connection, +Destination, +Headers, +JSON
             stomp_subscribe/4,     % +Connection, +Destination, +Id, +Headers
@@ -29,7 +30,7 @@ is used as a reference for the implementation.
 */
 
 :- meta_predicate
-    stomp_connection(+, 4, -),
+    stomp_connection(+, +, +, 4, -),
     stomp_transaction(+, 0).
 
 :- use_module(library(apply)).
@@ -45,7 +46,8 @@ is used as a reference for the implementation.
 :- dynamic
     connection_property/3.
 
-%!  stomp_connection(+Address, :Callback, -Connection) is det.
+%!  stomp_connection(+Address, +Host, +Headers, :Callback, -Connection)
+%!	is det.
 %
 %   Create a connection reference. The connection is   not set up yet by
 %   this predicate. Callback is called on  any received frame except for
@@ -78,16 +80,42 @@ is used as a reference for the implementation.
 %       An error happened.  All three arguments are valid and handled
 %       as `message`.
 
-stomp_connection(Address, Callback, Connection) :-
+stomp_connection(Address, Host, Headers, Callback, Connection) :-
+    valid_address(Address),
+    must_be(atom, Host),
+    must_be(dict, Headers),
+    must_be(callable, Callback),
     uuid(Connection),
     retractall(connection_property(Connection, _, _)),
-    asserta(connection_property(Connection, address, Address)),
-    asserta(connection_property(Connection, callback, Callback)).
+    update_connection_mapping(
+        Connection,
+        _{ address: Address,
+           callback: Callback,
+           host: Host,
+           headers: Headers
+         }).
+
+valid_address(Host:Port) :-
+    !,
+    must_be(atom, Host),
+    must_be(integer, Port).
+valid_address(Address) :-
+    type_error(stom_address, Address).
+
+connection_property(address).
+connection_property(callback).
+connection_property(host).
+connection_property(headers).
+
 
 %!  stomp_setup(+Connection) is det.
 %
-%   Set up the actual socket connection and start receiving thread.
+%   Set up the actual socket connection and start receiving thread. This
+%   is a no-op if the connection has already been created.
 
+stomp_setup(Connection) :-
+    connection_property(Connection, stream, _Stream),
+    !.
 stomp_setup(Connection) :-
     connection_property(Connection, address, Address),
     tcp_connect(Address, Stream, []),
@@ -102,26 +130,35 @@ stomp_setup(Connection) :-
 %!  stomp_teardown(+Connection) is semidet.
 %
 %   Tear down the socket connection, stop receiving thread and heartbeat
-%   thread (if applicable).
+%   thread (if applicable).  The  registration   of  the  connection  as
+%   created by stomp_connection/5 is preserved and the connection may be
+%   reconnected using stomp_connect/1.
 
 stomp_teardown(Connection) :-
     terminate_helper(Connection, receiver_thread_id),
     terminate_helper(Connection, heartbeat_thread_id),
-    connection_property(Connection, stream, Stream),
-    close(Stream, [force(true)]),
+    forall(connection_property(Connection, stream, Stream),
+           close(Stream, [force(true)])),
     debug(stompl(connection), 'retract connection mapping', []),
-    retractall(connection_property(Connection, _, _)).
+    reset_connection_properties(Connection).
 
 terminate_helper(Connection, Helper) :-
-    connection_property(Connection, Helper, Thread),
+    retract(connection_property(Connection, Helper, Thread)),
     \+ thread_self(Thread),
     catch(thread_signal(Thread, throw(kill)), error(_,_), fail),
     !,
     thread_join(Thread, _Status).
 terminate_helper(_, _).
 
+reset_connection_properties(Connection) :-
+    findall(P,
+            (   connection_property(Connection, P, _),
+                \+ connection_property(P)
+            ), Ps),
+    forall(member(P, Ps),
+           retractall(connection_property(Connection, P, _))).
 
-%!  stomp_connect(+Connectio, +Host, +Headers) is det.
+%!  stomp_connect(+Connectio) is det.
 %
 %   Send a ``CONNECT`` frame. Protocol version and heartbeat negotiation
 %   will  be  handled.  ``STOMP``  frame  is    not  used  for  backward
@@ -130,7 +167,10 @@ terminate_helper(_, _).
 %   @see http://stomp.github.io/stomp-specification-1.1.html#CONNECT_or_STOMP_Frame).
 %   @tbd 1.2 doesn't bring much benefit but trouble
 
-stomp_connect(Connection, Host, Headers) :-
+stomp_connect(Connection) :-
+    stomp_setup(Connection),
+    connection_property(Connection, headers, Headers),
+    connection_property(Connection, host, Host),
     send_frame(Connection,
                connect,
                Headers.put(_{ 'accept-version':'1.0,1.1',
@@ -516,7 +556,7 @@ start_heartbeat(Connection, CHB, SHB) :-
     extract_heartbeats(SHB, SX, SY),
     calculate_heartbeats(CX-CY, SX-SY, X-Y),
     X-Y \= 0-0, !,
-    debug(stompl(heartbeat), 'calculated heartbeats are ~w,~w', [X, Y]),
+    debug(stompl(heartbeat), 'calculated heartbeats are ~p,~p', [X, Y]),
     SendSleep is X / 1000,
     ReceiveSleep is Y / 1000 + 2,
     (   SendSleep = 0
@@ -573,12 +613,19 @@ heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime) :-
     heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime1).
 
 %!  notify(+Connection, +FrameType) is det.
-%!  notify(+Connection, +FrameType, +Frame) is det.
+%!  notify(+Connection, +FrameType, +Header) is det.
+%!  notify(+Connection, +FrameType, +Header, +Body) is det.
 
+notify(Connection, disconnected) :-
+    !,
+    call_cleanup(notify(Connection, FrameType, stomp_header{cmd:FrameType}, ""),
+                 stomp_teardown(Connection)).
 notify(Connection, FrameType) :-
     notify(Connection, FrameType, stomp_header{cmd:FrameType}, "").
+
 notify(Connection, FrameType, Header) :-
     notify(Connection, FrameType, Header, "").
+
 notify(Connection, FrameType, Header, Body) :-
     connection_property(Connection, callback, Callback),
     Error = error(Formal,_),
