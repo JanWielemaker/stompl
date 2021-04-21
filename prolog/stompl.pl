@@ -267,6 +267,7 @@ send_frame(Connection, Command, Headers, _Body) :-
     get_mapping_data(Connection, stream, Stream),
     send_command(Stream, Command),
     send_header(Stream, Headers),
+    format(Stream, '\u0000\n', []),
     flush_output(Stream).
 
 send_command(Stream, Command) :-
