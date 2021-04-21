@@ -13,6 +13,7 @@
             stomp_begin/2,         % +Connection, +Transaction
             stomp_commit/2,        % +Connection, +Transaction
             stomp_abort/2,         % +Connection, +Transaction
+            stomp_transaction/2,   % +Connection, :Goal
             stomp_disconnect/2     % +Connection, +Headers
           ]).
 
@@ -29,23 +30,33 @@ is used as a reference for the implementation.
 */
 
 :- meta_predicate
-    stomp_connection(+,:,-).
+    stomp_connection(+, 4, -),
+    stomp_transaction(+, 0).
 
-:- use_module(library(uuid)).
-:- use_module(library(socket)).
 :- use_module(library(apply)).
-:- use_module(library(http/json)).
 :- use_module(library(debug)).
-:- use_module(library(readutil)).
+:- use_module(library(error)).
+:- use_module(library(gensym)).
 :- use_module(library(http/http_stream)).
+:- use_module(library(http/json)).
+:- use_module(library(readutil)).
+:- use_module(library(socket)).
+:- use_module(library(uuid)).
 
 :- dynamic
-    connection_mapping/2.
+    connection_property/3.
 
-%!  stomp_connection(+Address, +CallbackDict, -Connected) is det.
+%!  stomp_connection(+Address, :Callback, -Connection) is det.
 %
 %   Create a connection reference. The connection is   not set up yet by
-%   this predicate. If CallbackDict is provided,   it will be associated
+%   this predicate. Callback is called on  any received frame except for
+%   _heart beat_ frames as below.
+%
+%   ```
+%   call(Callback, Command, Connection, Header, Body)
+%   ```
+%
+%   Where command is one of the commands below.
 %   with the connection reference. Valid  keys   of  the dict are below,
 %   together with the additional arguments passed.   `Header`  is a dict
 %   holding the STOMP frame header, where  all values are strings except
@@ -54,39 +65,32 @@ is used as a reference for the implementation.
 %   Body  is  a   string   or,   if   the    data   is   of   the   type
 %   ``application/json``, a dict.
 %
-%     - on_connected:Closure
-%       Called as call(Closure, Connection, Header)
-%     - on_disconnected:Closure
-%       Called as call(Closure, Connection, Header)
-%     - on_message:Closure
-%       Called as call(Closure, Connection, Header, Body)
-%     - on_heartbeat_timeout:Closure
-%       Called as call(Closure, Connection, Header)
-%     - on_error:Closure
-%       Called as call(Closure, Connection, Header, Body)
+%     - connected
+%       A connection was established.  Connection and Header are valid.
+%     - disconnected
+%       The connection was lost.  Only Connection is valid.
+%     - message
+%       A message arrived.  All three arguments are valid.  Body is
+%       a dict if the ``content-type`` of the message is
+%       ``application/json`` and a string otherwise.
+%     - heartbeat_timeout
+%       No heartbeat was received.  Only Connection is valid.
+%     - error
+%       An error happened.  All three arguments are valid and handled
+%       as `message`.
 
-stomp_connection(Address, Module:CallbackDict, Connection) :-
+stomp_connection(Address, Callback, Connection) :-
     uuid(Connection),
-    qualify_callbacks(Module, CallbackDict, CallbackDictQ),
-    asserta(connection_mapping(Connection,
-                               _{ address: Address,
-                                  callbacks: CallbackDictQ
-                                })).
-
-qualify_callbacks(Module, Dict, DictQ) :-
-    dict_pairs(Dict, Tag, Pairs),
-    maplist(qualify_callback(Module), Pairs, PairsQ),
-    dict_pairs(DictQ, Tag, PairsQ).
-
-qualify_callback(Module, Name-Value, Name-(M:Plain)) :-
-    strip_module(Module:Value, M, Plain).
+    retractall(connection_property(Connection, _, _)),
+    asserta(connection_property(Connection, address, Address)),
+    asserta(connection_property(Connection, callback, Callback)).
 
 %!  stomp_setup(+Connection) is det.
 %
 %   Set up the actual socket connection and start receiving thread.
 
 stomp_setup(Connection) :-
-    get_mapping_data(Connection, address, Address),
+    connection_property(Connection, address, Address),
     tcp_connect(Address, Stream, []),
     gensym(stompl_receive, Alias),
     thread_create(receive(Connection, Stream), ReceiverThreadId, [alias(Alias)]),
@@ -104,13 +108,13 @@ stomp_setup(Connection) :-
 stomp_teardown(Connection) :-
     terminate_helper(Connection, receiver_thread_id),
     terminate_helper(Connection, heartbeat_thread_id),
-    get_mapping_data(Connection, stream, Stream),
+    connection_property(Connection, stream, Stream),
     close(Stream, [force(true)]),
     debug(stompl(connection), 'retract connection mapping', []),
-    retract(connection_mapping(Connection, _)).
+    retractall(connection_property(Connection, _, _)).
 
 terminate_helper(Connection, Helper) :-
-    get_mapping_data(Connection, Helper, Thread),
+    connection_property(Connection, Helper, Thread),
     \+ thread_self(Thread),
     catch(thread_signal(Thread, throw(kill)), error(_,_), fail),
     !,
@@ -134,7 +138,7 @@ stomp_connect(Connection, Host, Headers) :-
                                host:Host
                             })),
     (   Heartbeat = Headers.get('heart-beat')
-    ->  update_connection_mapping(Connection, _{'heart-beat':Heartbeat})
+    ->  update_connection_property(Connection, 'heart-beat', Heartbeat)
     ;   true
     ).
 
@@ -152,7 +156,8 @@ stomp_send(Connection, Destination, Headers) :-
     stomp_send(Connection, Destination, Headers).
 
 stomp_send(Connection, Destination, Headers, Body) :-
-    send_frame(Connection, send, Headers.put(destination, Destination), Body).
+    add_transaction(Headers, Headers1),
+    send_frame(Connection, send, Headers1.put(destination, Destination), Body).
 
 %!  stomp_send_json(+Connection, +Destination, +Headers, +JSON) is det.
 %
@@ -163,11 +168,12 @@ stomp_send(Connection, Destination, Headers, Body) :-
 %   @see http://stomp.github.io/stomp-specification-1.1.html#SEND
 
 stomp_send_json(Connection, Destination, Headers, JSON) :-
+    add_transaction(Headers, Headers1),
     atom_json_term(Body, JSON, [as(string)]),
     send_frame(Connection, send,
-               Headers.put(_{ destination:Destination,
-                              'content-type':'application/json'
-                            }),
+               Headers1.put(_{ destination:Destination,
+                               'content-type':'application/json'
+                             }),
                Body).
 
 %!  stomp_subscribe(+Connection, +Destination, +Id, +Headers) is det.
@@ -233,6 +239,43 @@ stomp_commit(Connection, Transaction) :-
 stomp_abort(Connection, Transaction) :-
     send_frame(Connection, abort, _{transaction:Transaction}).
 
+%!  stomp_transaction(+Connection, :Goal) is semidet.
+%
+%   Run Goal as  once/1,  tagging  all   ``SEND``  messages  inside  the
+%   transaction with the transaction id.  If   Goal  fails  or raises an
+%   exception the transaction is aborted.   Failure  or exceptions cause
+%   the transaction to be aborted using   stomp_abort/2, after which the
+%   result is forwarded.
+
+stomp_transaction(Connection, Goal) :-
+    uuid(TransactionID),
+    stomp_transaction(Connection, Goal, TransactionID).
+
+stomp_transaction(Connection, Goal, TransactionID) :-
+    stomp_begin(Connection, TransactionID),
+    (   catch(once(Goal), Error, true)
+    ->  (   var(Error)
+        ->  stomp_commit(Connection, TransactionID)
+        ;   stomp_abort(Connection, TransactionID),
+            throw(Error)
+        )
+    ;   stomp_abort(Connection, TransactionID),
+        fail
+    ).
+
+in_transaction(TransactionID) :-
+    prolog_current_frame(Frame),
+    prolog_frame_attribute(
+        Frame, parent_frame,
+        stomp_transaction(_Connection, _Goal, TransactionID)).
+
+add_transaction(Headers, Headers1) :-
+    in_transaction(TransactionID),
+    !,
+    Headers1 = Headers.put(transaction, TransactionID).
+add_transaction(Headers, Headers).
+
+
 %!  stomp_disconnect(+Connection, +Headers) is det.
 %
 %   Send a ``DISCONNECT`` frame.
@@ -247,7 +290,7 @@ stomp_disconnect(Connection, Headers) :-
 
 send_frame(Connection, heartbeat, _Headers) :-
     !,
-    get_mapping_data(Connection, stream, Stream),
+    connection_property(Connection, stream, Stream),
     put_code(Stream, 0'\n),
     flush_output(Stream).
 send_frame(Connection, Command, Headers) :-
@@ -257,7 +300,7 @@ send_frame(Connection, Command, Headers) :-
 send_frame(Connection, Command, Headers, Body) :-
     has_body(Command),
     !,
-    get_mapping_data(Connection, stream, Stream),
+    connection_property(Connection, stream, Stream),
     default_content_type('text/plain', Headers, Headers1),
     body_bytes(Body, ContentLength),
     Headers2 = Headers1.put('content-length', ContentLength),
@@ -266,7 +309,7 @@ send_frame(Connection, Command, Headers, Body) :-
     format(Stream, '~w\u0000\n', [Body]),
     flush_output(Stream).
 send_frame(Connection, Command, Headers, _Body) :-
-    get_mapping_data(Connection, stream, Stream),
+    connection_property(Connection, stream, Stream),
     send_command(Stream, Command),
     send_header(Stream, Headers),
     format(Stream, '\u0000\n', []),
@@ -453,17 +496,21 @@ process_frame(Connection, Frame) :-
     Frame.cmd = heartbeat, !,
     get_time(Now),
     debug(stompl(heartbeat), 'received heartbeat at ~w', [Now]),
-    update_connection_mapping(Connection, _{received_heartbeat:Now}).
+    update_connection_property(Connection, received_heartbeat, Now).
 process_frame(Connection, Frame) :-
-    FrameType = Frame.cmd,
+    _{cmd:FrameType, headers:Headers, body:Body} :< Frame,
+    !,
+    notify(Connection, FrameType, Headers, Body).
+process_frame(Connection, Frame) :-
+    _{cmd:FrameType, headers:Headers} :< Frame,
     (   FrameType == connected
-    ->  start_heartbeat_if_required(Connection, Frame.headers)
+    ->  start_heartbeat_if_required(Connection, Headers)
     ;   true
     ),
-    notify(Connection, FrameType, Frame).
+    notify(Connection, FrameType, Headers).
 
 start_heartbeat_if_required(Connection, Headers) :-
-    (   get_mapping_data(Connection, 'heart-beat', CHB),
+    (   connection_property(Connection, 'heart-beat', CHB),
         SHB = Headers.get('heart-beat')
     ->  start_heartbeat(Connection, CHB, SHB)
     ;   true
@@ -490,9 +537,8 @@ start_heartbeat(Connection, CHB, SHB) :-
                                  SleepTime, Now),
                   HeartbeatThreadId, [alias(Alias)]),
     update_connection_mapping(Connection,
-                              _{
-                                heartbeat_thread_id:HeartbeatThreadId,
-                                received_heartbeat:Now
+                              _{ heartbeat_thread_id:HeartbeatThreadId,
+                                 received_heartbeat:Now
                                }).
 start_heartbeat(_, _, _).
 
@@ -520,7 +566,7 @@ heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime) :-
         send_frame(Connection, heartbeat, _{})
     ;   SendTime1 = SendTime
     ),
-    get_mapping_data(Connection, received_heartbeat, ReceivedHeartbeat),
+    connection_property(Connection, received_heartbeat, ReceivedHeartbeat),
     DiffReceive is Now - ReceivedHeartbeat,
     (   DiffReceive > ReceiveSleep
     ->  debug(stompl(heartbeat),
@@ -535,59 +581,30 @@ heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime) :-
 %!  notify(+Connection, +FrameType, +Frame) is det.
 
 notify(Connection, FrameType) :-
-    get_mapping_data(Connection, callbacks, CallbackDict),
-    atom_concat(on_, FrameType, Key),
-    (   Predicate = CallbackDict.get(Key)
-    ->  debug(stompl(callback), 'callback predicate ~w', [Predicate]),
-        callback(Predicate, Connection)
-    ;   true
-    ).
-
-notify(Connection, FrameType, Frame) :-
-    get_mapping_data(Connection, callbacks, CallbackDict),
-    atom_concat(on_, FrameType, Key),
-    (   Predicate = CallbackDict.get(Key)
-    ->  debug(stompl(callback), 'callback predicate ~w', [Predicate]),
-        (   has_body(FrameType)
-        ->  callback(Predicate, Connection, Frame.headers, Frame.body)
-        ;   callback(Predicate, Connection, Frame.headers)
+    notify(Connection, FrameType, stomp_header{cmd:FrameType}, "").
+notify(Connection, FrameType, Header) :-
+    notify(Connection, FrameType, Header, "").
+notify(Connection, FrameType, Header, Body) :-
+    connection_property(Connection, callback, Callback),
+    Error = error(Formal,_),
+    (   catch_with_backtrace(
+            call(Callback, FrameType, Connection, Header, Body),
+            Error, true)
+    ->  (   var(Formal)
+        ->  true
+        ;   print_message(warning, Error)
         )
     ;   true
     ).
 
-callback(Pred, Connection) :-
-    Error = error(_,_),
-    (   catch_with_backtrace(
-            call(Pred, Connection),
-            Error,
-            print_message(warning, Error))
-    ->  true
-    ;   true
-    ).
-callback(Pred, Connection, Headers) :-
-    Error = error(_,_),
-    (   catch_with_backtrace(
-            call(Pred, Connection, Headers),
-            Error,
-            print_message(warning, Error))
-    ->  true
-    ;   true
-    ).
-callback(Pred, Connection, Headers, Body) :-
-    Error = error(_,_),
-    (   catch_with_backtrace(
-            call(Pred, Connection, Headers, Body),
-            Error,
-            print_message(warning, Error))
-    ->  true
-    ;   true
-    ).
-
-get_mapping_data(Connection, Key, Value) :-
-    connection_mapping(Connection, Dict),
-    Value = Dict.get(Key).
-
 update_connection_mapping(Connection, Dict) :-
-    connection_mapping(Connection, OldDict),
-    retract(connection_mapping(Connection, OldDict)),
-    asserta(connection_mapping(Connection, OldDict.put(Dict))).
+    dict_pairs(Dict, _, Pairs),
+    maplist(update_connection_property(Connection), Pairs).
+
+update_connection_property(Connection, Name-Value) :-
+    retractall(connection_property(Connection, Name, _)),
+    asserta(connection_property(Connection, Name, Value)).
+update_connection_property(Connection, Name, Value) :-
+    retractall(connection_property(Connection, Name, _)),
+    asserta(connection_property(Connection, Name, Value)).
+
