@@ -29,6 +29,9 @@ is used as a reference for the implementation.
 @see https://github.com/jasonrbriggs/stomp.py
 */
 
+:- meta_predicate
+    connection(+,:,-).
+
 :- use_module(library(uuid)).
 :- use_module(library(socket)).
 :- use_module(library(apply)).
@@ -69,13 +72,21 @@ is used as a reference for the implementation.
 connection(Address, Connection) :-
     connection(Address, Connection, _{}).
 
-connection(Address, CallbackDict, Connection) :-
+connection(Address, Module:CallbackDict, Connection) :-
     uuid(Connection),
+    qualify_callbacks(Module, CallbackDict, CallbackDictQ),
     asserta(connection_mapping(Connection,
-                               _{
-                                 address: Address,
-                                 callbacks: CallbackDict
+                               _{ address: Address,
+                                  callbacks: CallbackDictQ
                                 })).
+
+qualify_callbacks(Module, Dict, DictQ) :-
+    dict_pairs(Dict, Tag, Pairs),
+    maplist(qualify_callback(Module), Pairs, PairsQ),
+    dict_pairs(DictQ, Tag, PairsQ).
+
+qualify_callback(Module, Name-Value, Name-(M:Plain)) :-
+    strip_module(Module:Value, M, Plain).
 
 %% setup(+Connection) is semidet.
 %
@@ -232,9 +243,14 @@ disconnect(Connection, Headers) :-
 %!  send_frame(+Connection, +Command, +Headers) is det.
 %!  send_frame(+Connection, +Command, +Headers, +Body) is det.
 
+send_frame(Connection, heartbeat, _Headers) :-
+    !,
+    get_mapping_data(Connection, stream, Stream),
+    put_code(Stream, 0'\n),
+    flush_output(Stream).
 send_frame(Connection, Command, Headers) :-
     assertion(\+has_body(Command)),
-    send_frame(Connection, Command, Headers).
+    send_frame(Connection, Command, Headers, '').
 
 send_frame(Connection, Command, Headers, Body) :-
     has_body(Command),
@@ -245,11 +261,13 @@ send_frame(Connection, Command, Headers, Body) :-
     Headers2 = Headers1.put('content-length', ContentLength),
     send_command(Stream, Command),
     send_header(Stream, Headers2),
-    format(Stream, '~w\u0000\n', [Body]).
+    format(Stream, '~w\u0000\n', [Body]),
+    flush_output(Stream).
 send_frame(Connection, Command, Headers, _Body) :-
     get_mapping_data(Connection, stream, Stream),
     send_command(Stream, Command),
-    send_header(Stream, Headers).
+    send_header(Stream, Headers),
+    flush_output(Stream).
 
 send_command(Stream, Command) :-
     string_upper(Command, Upper),
@@ -486,15 +504,15 @@ heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime) :-
     get_time(Now),
     (   Now - SendTime > SendSleep
     ->  SendTime1 = Now,
-        debug(stompl(heartbeat), 'sending a heartbeat message at ~w', [Now]),
-        send0(Connection, '\x0a', false)
+        debug(stompl(heartbeat), 'sending a heartbeat message at ~p', [Now]),
+        send_frame(Connection, heartbeat, _{})
     ;   SendTime1 = SendTime
     ),
     get_mapping_data(Connection, received_heartbeat, ReceivedHeartbeat),
     DiffReceive is Now - ReceivedHeartbeat,
     (   DiffReceive > ReceiveSleep
     ->  debug(stompl(heartbeat),
-              'heartbeat timeout: diff_receive=~w, time=~w, lastrec=~w',
+              'heartbeat timeout: diff_receive=~p, time=~p, lastrec=~p',
               [DiffReceive, Now, ReceivedHeartbeat]),
         notify(Connection, heartbeat_timeout)
     ;   true
