@@ -402,7 +402,7 @@ send_frame_guarded(Connection, heartbeat, _Headers) :-
     flush_output(Stream).
 send_frame_guarded(Connection, Command, Headers) :-
     assertion(\+has_body(Command)),
-    send_frame(Connection, Command, Headers, '').
+    send_frame_guarded(Connection, Command, Headers, '').
 
 send_frame_guarded(Connection, Command, Headers, Body) :-
     has_body(Command),
@@ -411,16 +411,18 @@ send_frame_guarded(Connection, Command, Headers, Body) :-
     default_content_type('text/plain', Headers, Headers1),
     body_bytes(Body, ContentLength),
     Headers2 = Headers1.put('content-length', ContentLength),
-    send_command(Stream, Command),
-    send_header(Stream, Headers2),
-    format(Stream, '~w\u0000\n', [Body]),
-    flush_output(Stream).
+    with_output_to(Stream,
+                   ( send_command(Stream, Command),
+                     send_header(Stream, Headers2),
+                     format(Stream, '~w\u0000\n', [Body]),
+                     flush_output(Stream))).
 send_frame_guarded(Connection, Command, Headers, _Body) :-
     connection_stream(Connection, Stream),
-    send_command(Stream, Command),
-    send_header(Stream, Headers),
-    format(Stream, '\u0000\n', []),
-    flush_output(Stream).
+    with_output_to(Stream,
+                   ( send_command(Stream, Command),
+                     send_header(Stream, Headers),
+                     format(Stream, '\u0000\n', []),
+                     flush_output(Stream))).
 
 %!  connection_stream(+Connection, -Stream)
 
