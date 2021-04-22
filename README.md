@@ -1,60 +1,60 @@
-# stompl
+# A STOMP client for SWI-Prolog
 
 A [STOMP](http://stomp.github.io) client.
+
+> This is a fork from https://github.com/honnix/stompl by Hongxin Liang.
+> (hxliang1982@gmail.com)  The  current  implementation   is  an  almost
+> complete  rewrite  of  the  frame   (de)serialization  and  connection
+> management with significant changes to the API.
+
 
 ## Installation
 
 Using SWI-Prolog 7 or later.
 
-    ?- pack_install('https://github.com/honnix/stompl.git').
+    ?- pack_install('https://github.com/JanWielemaker/stompl.git').
 
-Source code available and pull requests accepted
-[here](https://github.com/honnix/stompl).
-
-@author Hongxin Liang <hxliang1982@gmail.com>
-
-@license Apache License Version 2.0
+Source     code     available     and     pull     requests     accepted
+[here](https://github.com/JanWielemaker/stompl).
 
 ## Supported STOMP versions
 
 Version 1.0 and 1.1 are supported, while 1.2 is not intentionally
 because I don't like '\r\n', plus it doesn't bring many new features.
 
-## Examples
+## Example
 
-    :- module(ex, []).
+```
+:- module(ex, []).
 
-    :- use_module(library(stompl)).
+:- use_module(library(stompl)).
 
-    ex :-
-        connection('192.168.99.100':32772,
-                   _{
-                     on_connected: ex:on_connected,
-                     on_message: ex:on_message,
-                     on_disconnected: ex:on_disconnected,
-                     on_error: ex:on_error,
-                     on_heartbeat_timeout: ex1:on_heartbeat_timeout
-                    },
-                   Connection),
-        setup(Connection),
-        connect(Connection, '/', _{'heart-beat':'5000,5000'}),
-        %% go ahead with something else
-        ...
+connect(Connection) :-
+    stomp_connection('127.0.0.1':32772,
+                     '/',
+                     _{'heart-beat': '5000,5000',
+                       login: guest,
+                       passcode: guest
+                      },
+                     on_frame, Connection),
+    stomp_connect(Connection).
 
-    on_connected(Connection, Headers, Body) :-
-        ...
+on_frame(connected, Connection, _Header, _Body) :-
+    ...
+on_frame(message, Connection, Header, Body) :-
+    ...
+on_frame(disconnected, Connection, _Header, _Body) :-
+    ...
+on_frame(error, Connection, Header, Body) :-
+    ...
+on_frame(heartbeat_timeout, Connection, _Header, _Body) :-
+    ...
 
-    on_message(Connection, Headers, Body) :-
-        ...
+% Sending messages
 
-    on_disconnected(Connection) :-
-        ...
-
-    on_error(Connection, Headers, Body) :-
-        ...
-
-    on_heartbeat_timeout(Connection) :-
-        ...
+    ...
+    stomp_send_json(Connection, '/queue/test', _{hello: "World"}).
+```
 
 For more examples, please check source code under `examples` directory.
 
