@@ -1,42 +1,42 @@
-:- module(ex1, []).
+:- module(ex1,
+          [ connect/1
+          ]).
 
+:- use_module(user:library(stompl)).    % make available on toplevel
 :- use_module(library(stompl)).
 
-:- debug(stompl).
-:- debug(ex1).
+% :- debug(stompl(_)).
+% :- debug(ex1).
 
-ex1 :-
-    connection('192.168.99.100':32772,
-               _{
-                 on_connected: ex1:on_connected,
-                 on_message: ex1:on_message,
-                 on_disconnected: ex1:on_disconnected,
-                 on_error: ex1:on_error,
-                 on_heartbeat_timeout: ex1:on_heartbeat_timeout
-                },
-               Connection),
-    setup(Connection),
-    connect(Connection, '/', _{'heart-beat':'5000,5000'}),
-    read(_).
+connect(Connection) :-
+    stomp_connection('127.0.0.1':32772,
+                     '/',
+                     _{'heart-beat': '5000,5000',
+                       login: guest,
+                       passcode: guest
+                      },
+                     on_frame, Connection),
+    stomp_connect(Connection).
 
-on_connected(Connection, _, _) :-
-    Destination = '/exchange/stompl',
-    subscribe(Connection, Destination, 0, _{}).
+:- det((on_frame/4)).
 
-on_message(Connection, Headers, Body) :-
-    debug(ex1, 'on_message from connection ~s~n~q~n~s', [Connection, Headers, Body]),
-    Destination = '/exchange/stompl_test',
-    send(Connection, Destination, _{}, 'this is body'),
-    send_json(Connection, Destination, _{}, _{key:value}),
-    disconnect(Connection, _{}).
+on_frame(connected, Connection, _Header, _Body) =>
+    Destination = '/queue/test',
+    stomp_subscribe(Connection, Destination, 0, _{}).
+on_frame(message, Connection, Header, Body) =>
+    debug(ex1, 'message from connection ~p~n~p~n~p',
+          [Connection, Header, Body]),
+    format('Received ~p~n', [Body]).
+on_frame(disconnected, Connection, _Header, _Body) =>
+    debug(ex1, 'on_disconnected from connection ~p', [Connection]),
+    stomp_teardown(Connection).
+on_frame(error, Connection, Header, Body) =>
+    debug(ex1, 'on_error from connection ~p~n~p~n~p',
+          [Connection, Header, Body]).
+on_frame(heartbeat_timeout, Connection, _Header, _Body) =>
+    debug(ex1, 'on_heartbeat_timeout from connection ~p', [Connection]),
+    stomp_teardown(Connection).
+on_frame(Event, Connection, _Header, _Body) =>
+    debug(ex1, 'Unknown event ~p on connection ~p',
+          [Event, Connection]).
 
-on_disconnected(Connection) :-
-    debug(ex1, 'on_disconnected from connection ~s', [Connection]),
-    teardown(Connection).
-
-on_error(Connection, Headers, Body) :-
-    debug(ex1, 'on_error from connection ~s~n~q~n~s', [Connection, Headers, Body]).
-
-on_heartbeat_timeout(Connection) :-
-    debug(ex1, 'on_heartbeat_timeout from connection ~s', [Connection]),
-    teardown(Connection).
