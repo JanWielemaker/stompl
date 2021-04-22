@@ -145,6 +145,7 @@ stomp_setup_guarded(Connection, false) :-
 stomp_setup_guarded(Connection, true) :-
     connection_property(Connection, address, Address),
     tcp_connect(Address, Stream, []),
+    set_stream(Stream, encoding(utf8)),
     gensym(stompl_receive, Alias),
     thread_create(receive(Connection, Stream), ReceiverThreadId, [alias(Alias)]),
     debug(stompl(connection), 'Handling input on thread ~p', [ReceiverThreadId]),
