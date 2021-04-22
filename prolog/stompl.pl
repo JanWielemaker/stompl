@@ -38,12 +38,34 @@ Messaging Protocol) client. This client  is   based  on  work by Hongxin
 Liang. The current version is a major rewrite, both changing the API and
 the low-level STOMP frame (de)serialization.
 
-A STOMP 1.0 and 1.1 compatible client.
+The predicate stomp_connection/5 is used to   register a connection. The
+connection is established by  stomp_connect/1,   which  is lazily called
+from any of the predicates that send   a STOMP frame. After establishing
+the connection two threads are created.   One  receives STOMP frames and
+the other manages and watches the _heart beat_.
+
+## Threading
+
+Upon receiving a frame the   callback registered with stomp_connection/5
+is called in  the  context  of   the  receiving  thread.  More demanding
+applications may decide to send incomming frames to a SWI-Prolog message
+queue and have one  or  more   _worker  threads_  processing  the input.
+Alternatively, frames may be  inspected  by   the  receiving  thread and
+either processed immediately or be dispatched   to either new or running
+threads.  The best scenario depends on the message rate, processing time
+and concurrency of the Prolog application.
+
+All message sending predicates of this library are _thread safe_. If two
+threads send a frame to the  same   connection  the library ensures that
+both frames are properly serialized.
 
 @author Hongxin Liang and Jan Wielemaker
 @license Apache License Version 2.0
 @see http://stomp.github.io/index.html
 @see https://github.com/jasonrbriggs/stomp.py
+@tbd Allow to keep trying to reestablish the connection if it was lost
+@tbd TSL support
+@tbd Tests and performance evaluation.
 */
 
 :- meta_predicate
