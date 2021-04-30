@@ -161,6 +161,9 @@ example.
 %       An error happened.  All three arguments are valid and handled
 %       as `message`.
 %
+%   Note that stomp_teardown/1 causes the receiving and heartbeat thread
+%   to be signalled with abort/0.
+%
 %   Options processed:
 %
 %     - reconnect(+Bool)
@@ -338,7 +341,7 @@ stomp_teardown(Connection) :-
 terminate_helper(Connection, Helper) :-
     retract(connection_property(Connection, Helper, Thread)),
     \+ thread_self(Thread),
-    catch(thread_signal(Thread, throw(kill)), error(_,_), fail),
+    catch(thread_signal(Thread, abort), error(_,_), fail),
     !,
     thread_join(Thread, _Status).
 terminate_helper(_, _).
