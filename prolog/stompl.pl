@@ -37,6 +37,8 @@
                                    % :Callback, -Connection
             stomp_connection/6,    % +Address, +Host, +Headers,
                                    % :Callback, -Connection, +Options
+            stomp_connection_property/2, % ?Connection, ?Property
+            stomp_destroy_connection/1, % +Connection
             stomp_connect/1,       % +Connection
             stomp_connect/2,       % +Connection, +Options
             stomp_teardown/1,      % +Connection
@@ -217,6 +219,47 @@ connection_property(headers).
 connection_property(reconnect).
 connection_property(connect_timeout).
 
+%!  stomp_connection_property(?Connection, ?Property) is nondet.
+%
+%   True when Property, is a property  of Connection. Defined properties
+%   are:
+%
+%     - address(Address)
+%     - callback(Callback)
+%     - host(Host)
+%     - headers(Headers)
+%     - reconnect(Bool)
+%     - connect_timeout(Seconds)
+%       All the above properties result from the stomp_connection/6
+%       registration.
+%     - receiver_thread_id(Thread)
+%     - stream(Stream)
+%     - heartbeat_thread_id(Thread)
+%     - received_heartbeat(TimeStamp)
+%       These describe an active STOMP connection.
+
+stomp_connection_property(Connection, Property) :-
+    var(Property),
+    !,
+    connection_property(Connection, Name, Value),
+    Property =.. [Name,Value].
+stomp_connection_property(Connection, Property) :-
+    must_be(compound, Property),
+    Property =.. [Name,Value],
+    connection_property(Connection, Name, Value).
+
+%!  stomp_destroy_connection(+Connection)
+%
+%   Destroy a connection. If it is active, first use stomp_teardown/1 to
+%   disconnect.
+
+stomp_destroy_connection(Connection) :-
+    must_be(ground, Connection),
+    (   connection_property(Connection, address, _)
+    ->  stomp_teardown(Connection),
+        retractall(connection_property(Connection, _, _))
+    ;   existence_error(stomp_connection, Connection)
+    ).
 
 %!  stomp_setup(+Connection, +Options) is det.
 %
