@@ -1,21 +1,46 @@
-/* Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+/*  Part of SWI-Prolog
 
-       http:  www.apache.org/licenses/LICENSE-2.0
+    Author:        Hongxin Liang and Jan Wielemaker
+    E-mail:        jan@swi-prolog.org
+    WWW:           http://www.swi-prolog.org
+    Copyright (c)  2021, SWI-Prolog Solutions b.v.
+    All rights reserved.
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+
+    1. Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+    2. Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in
+       the documentation and/or other materials provided with the
+       distribution.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+    FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+    COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+    INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+    BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+    LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+    LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+    ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
 */
 
 :- module(stompl,
           [ stomp_connection/5,    % +Address, +Host, +Headers,
                                    % :Callback, -Connection
+            stomp_connection/6,    % +Address, +Host, +Headers,
+                                   % :Callback, -Connection, +Options
             stomp_connect/1,       % +Connection
+            stomp_connect/2,       % +Connection, +Options
             stomp_teardown/1,      % +Connection
+            stomp_reconnect/1,	   % +Connection
             stomp_send/4,          % +Connection, +Destination, +Headers, +Body
             stomp_send_json/4,     % +Connection, +Destination, +Headers, +JSON
             stomp_subscribe/4,     % +Connection, +Destination, +Id, +Headers
@@ -28,7 +53,7 @@
             stomp_begin/2,         % +Connection, +Transaction
             stomp_commit/2,        % +Connection, +Transaction
             stomp_abort/2,         % +Connection, +Transaction
-            stomp_setup/1          % +Connection
+            stomp_setup/2          % +Connection, +Options
           ]).
 
 /** <module> STOMP client.
@@ -59,17 +84,26 @@ All message sending predicates of this library are _thread safe_. If two
 threads send a frame to the  same   connection  the library ensures that
 both frames are properly serialized.
 
+## Reconnecting
+
+By default this library tries to establish   the connection and the user
+gets notified by  means  of  a   `disconnected`  pseudo  frame  that the
+connection is lost. Using the Options argument of stomp_connection/6 the
+system can be configured to try and keep connecting if the server is not
+available and reconnect if  the  connection   is  lost.  See the pong.pl
+example.
+
 @author Hongxin Liang and Jan Wielemaker
-@license Apache License Version 2.0
+@license BSD-2
 @see http://stomp.github.io/index.html
 @see https://github.com/jasonrbriggs/stomp.py
-@tbd Allow to keep trying to reestablish the connection if it was lost
 @tbd TSL support
-@tbd Tests and performance evaluation.
+@tbd Add more tests.
 */
 
 :- meta_predicate
     stomp_connection(+, +, +, 4, -),
+    stomp_connection(+, +, +, 4, -, +),
     stomp_transaction(+, 0).
 
 :- use_module(library(apply)).
@@ -81,12 +115,17 @@ both frames are properly serialized.
 :- use_module(library(readutil)).
 :- use_module(library(socket)).
 :- use_module(library(uuid)).
+:- use_module(library(lists)).
+:- use_module(library(option)).
+:- use_module(library(time)).
 
 :- dynamic
     connection_property/3.
 
-%!  stomp_connection(+Address, +Host, +Headers, :Callback, -Connection)
-%!	is det.
+%!  stomp_connection(+Address, +Host, +Headers, :Callback,
+%!                   -Connection) is det.
+%!  stomp_connection(+Address, +Host, +Headers, :Callback,
+%!                   -Connection, +Options) is det.
 %
 %   Create a connection reference. The connection is   not set up yet by
 %   this predicate. Callback is called on  any received frame except for
@@ -96,9 +135,7 @@ both frames are properly serialized.
 %   call(Callback, Command, Connection, Header, Body)
 %   ```
 %
-%   Where command is one of the commands below.
-%   with the connection reference. Valid  keys   of  the dict are below,
-%   together with the additional arguments passed.   `Header`  is a dict
+%   Where command is one of  the  commands   below.  `Header`  is a dict
 %   holding the STOMP frame header, where  all values are strings except
 %   for the `'content-length'` key value which is passed as an integer.
 %
@@ -113,13 +150,40 @@ both frames are properly serialized.
 %       A message arrived.  All three arguments are valid.  Body is
 %       a dict if the ``content-type`` of the message is
 %       ``application/json`` and a string otherwise.
+%     - heartbeat
+%       A heartbeat was received.  Only Connection is valid.  This
+%       callback is also called for each newline that follows a frame.
+%       These newlines can be a heartbeat, but can also be additional
+%       newlines that follow a frame.
 %     - heartbeat_timeout
 %       No heartbeat was received.  Only Connection is valid.
 %     - error
 %       An error happened.  All three arguments are valid and handled
 %       as `message`.
+%
+%   Options processed:
+%
+%     - reconnect(+Bool)
+%       Try to reestablish the connection to the server if the
+%       connection is lost.  Default is `false`
+%     - connect_timeout(Seconds)
+%       Maximum time to try and reestablish a connection.  The
+%       default is `600` (10 minutes).
+%
+%   @arg Address is a valid address   for tcp_connect/3. Normally a term
+%   Host:Port, e.g., `localhost:32772`.
+%   @arg Host is a path denoting the STOMP host.  Often just `/`.
+%   @arg Headers is a dict with STOMP headers used for the ``CONNECT``
+%   request.
+%   @arg Connection is an opaque ground term that identifies the
+%   connection.
 
 stomp_connection(Address, Host, Headers, Callback, Connection) :-
+    stomp_connection(Address, Host, Headers, Callback, Connection, []).
+
+stomp_connection(Address, Host, Headers, Callback, Connection, Options) :-
+    option(reconnect(Reconnect), Options, false),
+    option(connect_timeout(Timeout), Options, 600),
     valid_address(Address),
     must_be(atom, Host),
     must_be(dict, Headers),
@@ -131,7 +195,9 @@ stomp_connection(Address, Host, Headers, Callback, Connection) :-
         _{ address: Address,
            callback: Callback,
            host: Host,
-           headers: Headers
+           headers: Headers,
+           reconnect: Reconnect,
+           connect_timeout: Timeout
          }).
 
 valid_address(Host:Port) :-
@@ -145,28 +211,35 @@ connection_property(address).
 connection_property(callback).
 connection_property(host).
 connection_property(headers).
+connection_property(reconnect).
+connection_property(connect_timeout).
 
 
-%!  stomp_setup(+Connection) is det.
+%!  stomp_setup(+Connection, +Options) is det.
 %
 %   Set up the actual socket connection and start receiving thread. This
-%   is a no-op if the connection has already been created.
+%   is a no-op if the connection has   already been created. The Options
+%   processed are below. Other options are passed to tcp_connect/3.
+%
+%     - timeout(+Seconds)
+%       If tcp_connect/3 fails, retry until the timeout is reached.
+%       If Seconds is `inf` or `infinite`, keep retrying forever.
 
-stomp_setup(Connection) :-
-    stomp_setup(Connection, _New).
+stomp_setup(Connection, Options) :-
+    stomp_setup(Connection, _New, Options).
 
-stomp_setup(Connection, false) :-
+stomp_setup(Connection, false, _) :-
     connection_property(Connection, stream, _Stream),
     !.
-stomp_setup(Connection, New) :-
-    with_mutex(stompl, stomp_setup_guarded(Connection, New)).
+stomp_setup(Connection, New, Options) :-
+    with_mutex(stompl, stomp_setup_guarded(Connection, New, Options)).
 
-stomp_setup_guarded(Connection, false) :-
+stomp_setup_guarded(Connection, false, _) :-
     connection_property(Connection, stream, _Stream),
     !.
-stomp_setup_guarded(Connection, true) :-
+stomp_setup_guarded(Connection, true, Options) :-
     connection_property(Connection, address, Address),
-    tcp_connect(Address, Stream, []),
+    connect(Connection, Address, Stream, Options),
     set_stream(Stream, encoding(utf8)),
     gensym(stompl_receive, Alias),
     thread_create(receive(Connection, Stream), ReceiverThreadId, [alias(Alias)]),
@@ -175,6 +248,77 @@ stomp_setup_guarded(Connection, true) :-
                               _{ receiver_thread_id: ReceiverThreadId,
                                  stream:Stream
                                }).
+
+%!  connect(+Connection, +Address, -Stream, +Options) is det.
+%
+%   Connect to Address. If the option timeout(Sec) is present, retry the
+%   connection until the timeout is reached.
+
+connect(Connection, Address, Stream, Options) :-
+    stomp_deadline(Connection, Deadline, Options),
+    connect_with_deadline(Connection, Address, Stream, Deadline, Options).
+
+connect_with_deadline(_Connection, Address, Stream, once, Options) :-
+    !,
+    tcp_connect(Address, Stream, Options).
+connect_with_deadline(Connection, Address, Stream, Deadline, Options) :-
+    number(Deadline),
+    !,
+    between(0, infinite, Retry),
+      get_time(Now),
+      Timeout is Deadline-Now,
+      (   Now > 0
+      ->  (   catch(call_with_time_limit(
+                        Timeout,
+                        tcp_connect(Address, Stream, Options)),
+                    Error,
+                    true)
+          ->  (   var(Error)
+              ->  !
+              ;   (   debugging(stompl(connection))
+                  ->  print_message(warning, Error)
+                  ;   true
+                  ),
+                  wait_retry(Connection, Error, Retry, Deadline)
+              )
+          ;   wait_retry(Connection, failed, Retry, Deadline)
+          )
+      ;   throw(stomp_error(connect, Connection, timeout))
+      ).
+connect_with_deadline(Connection, Address, Stream, Deadline, Options) :-
+    between(0, infinite, Retry),
+      Error = error(Formal, _),
+      (   catch(tcp_connect(Address, Stream, Options),
+                Error,
+                true)
+      ->  (   var(Formal)
+          ->  !
+          ;   (   debugging(stompl(connection))
+              ->  print_message(warning, Error)
+              ;   true
+              ),
+              wait_retry(Connection, Formal, Retry, Deadline)
+          )
+      ;   wait_retry(Connection, failed, Retry, Deadline)
+      ).
+
+wait_retry(Connection, Why, _Retry, _Deadline) :-
+    Why = error(stomp_error(connect, Connection, error(_)), _),
+    !,
+    throw(Why).
+wait_retry(Connection, _Why, Retry, Deadline) :-
+    Wait0 is min(10, 0.1 * (1<<Retry)),
+    (   number(Deadline)
+    ->  get_time(Now),
+        Wait is min(Deadline-Now, Wait0)
+    ;   Wait = Wait0
+    ),
+    (   Wait > 0
+    ->  sleep(Wait),
+        fail
+    ;   throw(error(stomp_error(connect, Connection, timeout), _))
+    ).
+
 
 %!  stomp_teardown(+Connection) is semidet.
 %
@@ -207,48 +351,80 @@ reset_connection_properties(Connection) :-
     forall(member(P, Ps),
            retractall(connection_property(Connection, P, _))).
 
+%!  stomp_reconnect(+Connection) is det.
+%
+%   Teardown the connection and try to reconnect.
+
+stomp_reconnect(Connection) :-
+    stomp_teardown(Connection),
+    stomp_connect(Connection).
+
 %!  stomp_connect(+Connection) is det.
+%!  stomp_connect(+Connection, +Options) is det.
 %
 %   Setup the connection. First ensures a  socket connection and if this
 %   is new send a ``CONNECT``  frame.   Protocol  version  and heartbeat
 %   negotiation will be  handled.  ``STOMP``  frame   is  not  used  for
 %   backward compatibility.
 %
+%   This predicate waits for the connection handshake to have completed.
+%   Currently it waits for a maximum   of  10 seconds after establishing
+%   the socket for the server reply.
+%
 %   Calling this on an established connection has no effect.
 %
-%   This call waits for the `connected` reply for 10 seconds.
-%
 %   @see http://stomp.github.io/stomp-specification-1.1.html#CONNECT_or_STOMP_Frame).
-%   @error stomp_error(connect, Connection) if no connection could be
-%   established.
-%   @tbd 1.2 doesn't bring much benefit but trouble
+%   @error stomp_error(connect, Connection, Detail) if no connection
+%   could be established.
 
 stomp_connect(Connection) :-
-    stomp_setup(Connection, New),
-    (   New == true
-    ->  connection_property(Connection, headers, Headers),
-        connection_property(Connection, host, Host),
-        send_frame(Connection,
-                   connect,
-                   Headers.put(_{ 'accept-version':'1.0,1.1',
-                                  host:Host
-                                })),
-        (   Heartbeat = Headers.get('heart-beat')
-        ->  update_connection_property(Connection, 'heart-beat', Heartbeat)
-        ;   true
-        ),
-        thread_self(Self),
-        update_connection_property(Connection, waiting_thread, Self),
-        (   thread_get_message(Self, stomp(connected(Connection)),
-                               [timeout(10)])
+    stomp_connect(Connection, []).
+
+stomp_connect(Connection, Options) :-
+    stomp_deadline(Connection, Deadline, Options),
+    stomp_deadline_connect(Connection, Deadline, Options).
+
+stomp_deadline_connect(Connection, Deadline, Options) :-
+    between(0, infinite, Retry),
+      stomp_setup(Connection, New, [deadline(Deadline)|Options]),
+      (   New == true
+      ->  Error = error(Formal, _),
+          catch(connect_handshake(Connection), Error, true),
+          (   var(Formal)
+          ->  !
+          ;   stomp_teardown(Connection),
+              wait_retry(Connection, Error, Retry, Deadline)
+          )
+      ;   connection_property(Connection, connected, _)
+      ->  true
+      ;   wait_connected(Connection)
+      ->  true
+      ;   stomp_teardown(Connection),
+          wait_retry(Connection, failed, Retry, Deadline)
+      ).
+
+connect_handshake(Connection) :-
+    connection_property(Connection, headers, Headers),
+    connection_property(Connection, host, Host),
+    send_frame(Connection,
+               connect,
+               Headers.put(_{ 'accept-version':'1.0,1.1,1.2',
+                              host:Host
+                            })),
+    (   Heartbeat = Headers.get('heart-beat')
+    ->  update_connection_property(Connection, 'heart-beat', Heartbeat)
+    ;   true
+    ),
+    thread_self(Self),
+    update_connection_property(Connection, waiting_thread, Self),
+    (   thread_get_message(Self, stomp(connected(Connection, Status)),
+                           [timeout(10)])
+    ->  (   Status == true
         ->  get_time(Now),
             update_connection_property(Connection, connected, Now)
-        ;   stomp_teardown(Connection),
-            throw(error(stomp_error(connect, Connection), _))
+        ;   throw(error(stomp_error(connect, Connection, Status), _))
         )
-    ;   connection_property(Connection, connected, _)
-    ->  true
-    ;   wait_connected(Connection)
+    ;   throw(error(stomp_error(connect, Connection, timeout), _))
     ).
 
 wait_connected(Connection) :-
@@ -258,7 +434,35 @@ wait_connected(Connection) :-
                 ]),
     !.
 wait_connected(Connection) :-
-    throw(error(stomp_error(connect, Connection), _)).
+    throw(error(stomp_error(connect, Connection, timeout), _)).
+
+%!  stomp_deadline(+Connection, -Deadline, +Options) is det.
+%
+%   True when there is a connection timeout and Deadline is the deadline
+%   for establishing a connection.  Deadline is one of
+%
+%     - Number
+%       The deadline as a time stamp
+%     - infinite
+%       Keep trying
+%     - once
+%       Try to connect once.
+
+stomp_deadline(_Connection, Deadline, Options) :-
+    option(deadline(Deadline), Options),
+    !.
+stomp_deadline(Connection, Deadline, Options) :-
+    (   option(timeout(Time), Options)
+    ;   connection_property(Connection, connect_timeout, Time)
+    ),
+    !,
+    (   number(Time)
+    ->  get_time(Now),
+        Deadline is Now+Time
+    ;   must_be(oneof([inf,infinite]), Time),
+        Deadline = infinite
+    ).
+stomp_deadline(_, once, _).
 
 
 %!  stomp_send(+Connection, +Destination, +Headers, +Body) is det.
@@ -401,30 +605,29 @@ stomp_disconnect(Connection, Headers) :-
 
 %!  send_frame(+Connection, +Command, +Headers) is det.
 %!  send_frame(+Connection, +Command, +Headers, +Body) is det.
+%
+%   Send a frame. If no connection is  established connect first. If the
+%   sending results in an I/O error, disconnect, reconnect and try again
+%   if the `reconnect` propertys is set.
 
 send_frame(Connection, Command, Headers) :-
-    Error = error(_,_),
-    catch(send_frame_guarded(Connection, Command, Headers),
-          Error,
-          send_failed(Connection, Error)).
+    send_frame(Connection, Command, Headers, "").
+
 send_frame(Connection, Command, Headers, Body) :-
-    Error = error(_,_),
+    Error = error(Formal,_),
     catch(send_frame_guarded(Connection, Command, Headers, Body),
           Error,
-          send_failed(Connection, Error)).
-
-send_failed(Connection, Error) :-
-    notify(Connection, disconnected),
-    throw(Error).
-
-send_frame_guarded(Connection, heartbeat, _Headers) :-
-    !,
-    connection_stream(Connection, Stream),
-    put_code(Stream, 0'\n),
-    flush_output(Stream).
-send_frame_guarded(Connection, Command, Headers) :-
-    assertion(\+has_body(Command)),
-    send_frame_guarded(Connection, Command, Headers, '').
+          true),
+    (   var(Formal)
+    ->  true
+    ;   connection_property(Connection, reconnect, true)
+    ->  notify(Connection, disconnected),
+        stomp_teardown(Connection),
+        debug(stompl(connection), 'Sending thread reconnects', []),
+        send_frame(Connection, Command, Headers, Body)
+    ;   notify(Connection, disconnected),
+        throw(Error)
+    ).
 
 send_frame_guarded(Connection, Command, Headers, Body) :-
     has_body(Command),
@@ -438,6 +641,11 @@ send_frame_guarded(Connection, Command, Headers, Body) :-
                      send_header(Stream, Headers2),
                      format(Stream, '~w\u0000\n', [Body]),
                      flush_output(Stream))).
+send_frame_guarded(Connection, heartbeat, _Headers, _Body) :-
+    !,
+    connection_stream(Connection, Stream),
+    nl(Stream),
+    flush_output(Stream).
 send_frame_guarded(Connection, Command, Headers, _Body) :-
     connection_stream(Connection, Stream),
     with_output_to(Stream,
@@ -483,8 +691,9 @@ escape_value(Value, String) :-
 escape([]) --> [].
 escape([H|T]) --> esc(H), escape(T).
 
+esc(0'\r) --> !, "\\r".
 esc(0'\n) --> !, "\\n".
-esc(0':)  --> !, "\\:".
+esc(0':)  --> !, "\\c".
 esc(0'\\) --> !, "\\\\".
 esc(C)    --> [C].
 
@@ -579,6 +788,7 @@ unescape([H|T]) --> "\\", !, unesc(H), unescape(T).
 unescape([H|T]) --> [H], !, unescape(T).
 unescape([]) --> [].
 
+unesc(0'\r) --> "r", !.
 unesc(0'\n) --> "n", !.
 unesc(0':)  --> "c", !.
 unesc(0'\\) --> "\\", !.
@@ -612,49 +822,74 @@ read_content(_Type, Stream, _Header, Content) :-
 receive(Connection, Stream) :-
     E = error(Formal, _),
     catch(read_frame(Stream, Frame), E, true),
+    !,
     (   var(Formal)
-    ->  debug(stompl(heartbeat), 'received frame ~p', [Frame]),
-        !,
+    ->  debug(stompl(receive), 'received frame ~p', [Frame]),
         (   Frame == end_of_file
-        ->  notify(Connection, disconnected)
+        ->  receive_done(Connection, end_of_file)
         ;   process_frame(Connection, Frame),
             receive(Connection, Stream)
         )
-    ;   print_message(warning, E),
-        notify(Connection, disconnected),
-        debug(stompl(connection), 'Receiver thread died', []),
-        thread_self(Me),
-        thread_detach(Me)
+    ;   receive_done(Connection, E)
     ).
 receive(Connection, _Stream) :-
+    receive_done(Connection, "failed to read frame").
+
+%!  receive_done(+Connection, +Why)
+%
+%   The receiver thread needs to  close   the  connection due to reading
+%   end-of-file, an I/O error or failure to parse a frame. If connection
+%   is configured to be restarted this   thread  will try to reestablish
+%   the connection. After reestablishing the   connection  this receiver
+%   thread terminates.
+
+receive_done(Connection, Why) :-
+    (   Why = error(_,_)
+    ->  print_message(warning, Why)
+    ;   true
+    ),
     notify(Connection, disconnected),
-    debug(stompl(connection), 'Receiver thread finished', []),
+    stomp_teardown(Connection),
+    (   connection_property(Connection, reconnect, true)
+    ->  debug(stompl(connection), 'Receiver thread reconnects (~p)', [Why]),
+        stomp_connect(Connection)
+    ;   debug(stompl(connection), 'Receiver thread terminates (~p)', [Why])
+    ),
     thread_self(Me),
     thread_detach(Me).
+
+%!  process_frame(+Connection, +Frame) is det.
+%
+%   Process an incoming frame.
 
 process_frame(Connection, Frame) :-
     Frame.cmd = heartbeat, !,
     get_time(Now),
     debug(stompl(heartbeat), 'received heartbeat at ~w', [Now]),
-    update_connection_property(Connection, received_heartbeat, Now).
+    update_connection_property(Connection, received_heartbeat, Now),
+    notify(Connection, heartbeat, _{}, "").
 process_frame(Connection, Frame) :-
     _{cmd:FrameType, headers:Headers, body:Body} :< Frame,
     !,
+    process_connect(FrameType, Connection, Frame),
     notify(Connection, FrameType, Headers, Body).
 process_frame(Connection, Frame) :-
     _{cmd:FrameType, headers:Headers} :< Frame,
-    (   FrameType == connected
-    ->  notify_connected(Connection),
-        start_heartbeat_if_required(Connection, Headers)
-    ;   true
-    ),
+    process_connect(FrameType, Connection, Frame),
     notify(Connection, FrameType, Headers).
 
-notify_connected(Connection) :-
+process_connect(connected, Connection, Frame) :-
     retract(connection_property(Connection, waiting_thread, Waiting)),
     !,
-    thread_send_message(Waiting, stomp(connected(Connection))).
-notify_connected(_).
+    thread_send_message(Waiting, stomp(connected(Connection, true))),
+    start_heartbeat_if_required(Connection, Frame.headers).
+process_connect(error, Connection, Frame) :-
+    retract(connection_property(Connection, waiting_thread, Waiting)),
+    !,
+    thread_send_message(
+        Waiting,
+        stomp(connected(Connection, error(Frame.body)))).
+process_connect(_, _, _).
 
 start_heartbeat_if_required(Connection, Headers) :-
     (   connection_property(Connection, 'heart-beat', CHB),
@@ -667,21 +902,24 @@ start_heartbeat(Connection, CHB, SHB) :-
     extract_heartbeats(CHB, CX, CY),
     extract_heartbeats(SHB, SX, SY),
     calculate_heartbeats(CX-CY, SX-SY, X-Y),
-    X-Y \= 0-0, !,
+    \+ (X =:= 0, Y =:= 0),
+    !,
     debug(stompl(heartbeat), 'calculated heartbeats are ~p,~p', [X, Y]),
     SendSleep is X / 1000,
     ReceiveSleep is Y / 1000 + 2,
-    (   SendSleep = 0
+    (   X =:= 0
     ->  SleepTime = ReceiveSleep
-    ;   (   ReceiveSleep = 0
+    ;   (   Y =:= 0
         ->  SleepTime = SendSleep
-        ;   SleepTime is gcd(SendSleep, ReceiveSleep) / 2
+        ;   SleepTime is gcd(X, Y) / 2000
         )
     ),
     get_time(Now),
     gensym(stompl_heartbeat, Alias),
+    debug(stompl(heartbeat), 'Creating heartbeat thread (~p ~p ~p)',
+          [SendSleep, ReceiveSleep, SleepTime]),
     thread_create(heartbeat_loop(Connection, SendSleep, ReceiveSleep,
-                                 SleepTime, Now),
+                                 SleepTime, Now, Now),
                   HeartbeatThreadId, [alias(Alias)]),
     update_connection_mapping(Connection,
                               _{ heartbeat_thread_id:HeartbeatThreadId,
@@ -695,16 +933,17 @@ extract_heartbeats(Heartbeat, X, Y) :-
     number_string(Y, YS).
 
 calculate_heartbeats(CX-CY, SX-SY, X-Y) :-
-    (   CX \= 0, SY \= 0
+    (   CX =\= 0, SY =\= 0
     ->  X is max(CX, floor(SY))
     ;   X = 0
     ),
-    (   CY \= 0, SX \= 0
+    (   CY =\= 0, SX =\= 0
     ->  Y is max(CY, floor(SX))
     ;   Y = 0
     ).
 
-heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime) :-
+heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime,
+               SendTime, ReceiveTime) :-
     sleep(SleepTime),
     get_time(Now),
     (   Now - SendTime > SendSleep
@@ -713,25 +952,31 @@ heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime) :-
         send_frame(Connection, heartbeat, _{})
     ;   SendTime1 = SendTime
     ),
+    (   Now - ReceiveTime > ReceiveSleep
+    ->  ReceiveTime1 = Now,
+        check_receive_heartbeat(Connection, Now, ReceiveSleep)
+    ;   ReceiveTime1 = ReceiveTime
+    ),
+    heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime,
+                   SendTime1, ReceiveTime1).
+
+check_receive_heartbeat(Connection, Now, ReceiveSleep) :-
     connection_property(Connection, received_heartbeat, ReceivedHeartbeat),
     DiffReceive is Now - ReceivedHeartbeat,
     (   DiffReceive > ReceiveSleep
     ->  debug(stompl(heartbeat),
-              'heartbeat timeout: diff_receive=~p, time=~p, lastrec=~p',
+              'Heartbeat timeout: diff_receive=~p, time=~p, lastrec=~p',
               [DiffReceive, Now, ReceivedHeartbeat]),
         notify(Connection, heartbeat_timeout)
     ;   true
-    ),
-    heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime, SendTime1).
+    ).
 
 %!  notify(+Connection, +FrameType) is det.
 %!  notify(+Connection, +FrameType, +Header) is det.
 %!  notify(+Connection, +FrameType, +Header, +Body) is det.
+%
+%   Call the callback using  FrameType.
 
-notify(Connection, disconnected) :-
-    !,
-    call_cleanup(notify(Connection, FrameType, stomp_header{cmd:FrameType}, ""),
-                 stomp_teardown(Connection)).
 notify(Connection, FrameType) :-
     notify(Connection, FrameType, stomp_header{cmd:FrameType}, "").
 
@@ -762,3 +1007,16 @@ update_connection_property(Connection, Name, Value) :-
     retractall(connection_property(Connection, Name, _)),
     asserta(connection_property(Connection, Name, Value)).
 
+
+		 /*******************************
+		 *            MESSAGES		*
+		 *******************************/
+
+:- multifile prolog:error_message//1.
+
+prolog:error_message(stomp_error(connect, Connection, error(Message))) -->
+    { connection_property(Connection, address, Address) },
+    [ 'STOMPL: Failed to connect to ~p: ~p'-[Address, Message] ].
+prolog:error_message(stomp_error(connect, Connection, Detail)) -->
+    { connection_property(Connection, address, Address) },
+    [ 'STOMPL: Failed to connect to ~p: ~p'-[Address, Detail] ].
