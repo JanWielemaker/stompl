@@ -381,8 +381,15 @@ stomp_connect(Connection) :-
     stomp_connect(Connection, []).
 
 stomp_connect(Connection, Options) :-
+    update_reconnect_property(Connection),
     stomp_deadline(Connection, Deadline, Options),
     stomp_deadline_connect(Connection, Deadline, Options).
+
+update_reconnect_property(Connection) :-
+    connection_property(Connection, reconnect, disconnected),
+    !,
+    update_connection_property(Connection, reconnect, true).
+update_reconnect_property(_).
 
 stomp_deadline_connect(Connection, Deadline, Options) :-
     between(0, infinite, Retry),
@@ -596,11 +603,18 @@ add_transaction(Headers, Headers).
 
 %!  stomp_disconnect(+Connection, +Headers) is det.
 %
-%   Send a ``DISCONNECT`` frame.
+%   Send a ``DISCONNECT`` frame. If the   connection has the `reconnect`
+%   property set to `true`, this  will   be  reset  to `disconnected` to
+%   avoid  reconnecting.  A  subsequent    stomp_connect/2   resets  the
+%   reconnect status.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#DISCONNECT
 
 stomp_disconnect(Connection, Headers) :-
+    (   connection_property(Connection, reconnect, true)
+    ->  update_connection_property(Connection, reconnect, disconnected)
+    ;   true
+    ),
     send_frame(Connection, disconnect, Headers).
 
 %!  send_frame(+Connection, +Command, +Headers) is det.
