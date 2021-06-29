@@ -173,9 +173,12 @@ example.
 %     - reconnect(+Bool)
 %       Try to reestablish the connection to the server if the
 %       connection is lost.  Default is `false`
-%     - connect_timeout(Seconds)
+%     - connect_timeout(+Seconds)
 %       Maximum time to try and reestablish a connection.  The
 %       default is `600` (10 minutes).
+%     - json_options(+Options)
+%       Options passed to json_read_dict/3 to translate
+%       `application/json` content to Prolog.  Default is `[]`.
 %
 %   @arg Address is a valid address   for tcp_connect/3. Normally a term
 %   Host:Port, e.g., `localhost:32772`.
@@ -191,6 +194,7 @@ stomp_connection(Address, Host, Headers, Callback, Connection) :-
 stomp_connection(Address, Host, Headers, Callback, Connection, Options) :-
     option(reconnect(Reconnect), Options, false),
     option(connect_timeout(Timeout), Options, 600),
+    option(json_options(JSONOptions), Options, []),
     valid_address(Address),
     must_be(atom, Host),
     must_be(dict, Headers),
@@ -204,7 +208,8 @@ stomp_connection(Address, Host, Headers, Callback, Connection, Options) :-
            host: Host,
            headers: Headers,
            reconnect: Reconnect,
-           connect_timeout: Timeout
+           connect_timeout: Timeout,
+           json_options: JSONOptions
          }).
 
 valid_address(Host:Port) :-
@@ -803,13 +808,13 @@ body_bytes(String, Bytes) :-
 		 *        INCOMING DATA		*
 		 *******************************/
 
-%!  read_frame(+Stream, -Frame) is det.
+%!  read_frame(+Connection, +Stream, -Frame) is det.
 %
 %   Read a frame from a STOMP stream.   On end-of-file, Frame is unified
 %   with the atom `end_of_file`. Otherwise  it   is  a  dict holding the
 %   `cmd`, `headers` (another dict) and `body` (a string)
 
-read_frame(Stream, Frame) :-
+read_frame(Connection, Stream, Frame) :-
     read_command(Stream, Command),
     (   Command == end_of_file
     ->  Frame = end_of_file
@@ -817,7 +822,7 @@ read_frame(Stream, Frame) :-
     ->  Frame = stomp_frame{cmd:heartbeat}
     ;   read_header(Stream, Header),
         (   has_body(Command)
-        ->  read_content(Stream, Header, Content),
+        ->  read_content(Connection, Stream, Header, Content),
             Frame = stomp_frame{cmd:Command, headers:Header, body:Content}
         ;   Frame = stomp_frame{cmd:Command, headers:Header}
         )
@@ -881,24 +886,25 @@ unesc(0':)  --> "c", !.
 unesc(0'\\) --> "\\", !.
 unesc(_) --> [C], { syntax_error(invalid_stomp_escape(C)) }.
 
-%!  read_content(+Stream, +Header, -Content) is det.
+%!  read_content(+Connection, +Stream, +Header, -Content) is det.
 %
 %   Read the body. Note that the body   may  be followed by an arbitrary
 %   number of newlines. We leave them in place to avoid blocking.
 
-read_content(Stream, Header, Content) :-
+read_content(Connection, Stream, Header, Content) :-
     _{ 'content-length':Bytes,
        'content-type':Type
      } :< Header,
     setup_call_cleanup(
         stream_range_open(Stream, DataStream, [size(Bytes)]),
-        read_content(Type, DataStream, Header, Content),
+        read_content(Connection, Type, DataStream, Header, Content),
         close(DataStream)).
 
-read_content("application/json", Stream, _Header, Content) :-
+read_content(Connection, "application/json", Stream, _Header, Content) :-
     !,
-    json_read_dict(Stream, Content).
-read_content(_Type, Stream, _Header, Content) :-
+    connection_property(Connection, json_options, Options),
+    json_read_dict(Stream, Content, Options).
+read_content(_Connection, _Type, Stream, _Header, Content) :-
     read_string(Stream, _, Content).
 
 
@@ -908,7 +914,7 @@ read_content(_Type, Stream, _Header, Content) :-
 
 receive(Connection, Stream) :-
     E = error(Formal, _),
-    catch(read_frame(Stream, Frame), E, true),
+    catch(read_frame(Connection, Stream, Frame), E, true),
     !,
     (   var(Formal)
     ->  debug(stompl(receive), 'received frame ~p', [Frame]),
