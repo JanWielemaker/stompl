@@ -47,6 +47,8 @@
             stomp_send_json/4,     % +Connection, +Destination, +Headers, +JSON
             stomp_subscribe/4,     % +Connection, +Destination, +Id, +Headers
             stomp_unsubscribe/2,   % +Connection, +Id
+            stomp_ack/2,           % +Connection, +MsgHeaders
+            stomp_nack/2,          % +Connection, +MsgHeaders
             stomp_ack/3,           % +Connection, +MessageId, +Headers
             stomp_nack/3,          % +Connection, +MessageId, +Headers
             stomp_transaction/2,   % +Connection, :Goal
@@ -568,7 +570,8 @@ stomp_unsubscribe(Connection, Id) :-
 
 %!  stomp_ack(+Connection, +MessageId, +Headers) is det.
 %
-%   Send an ``ACK`` frame.
+%   Send an ``ACK`` frame. See stomp_ack/2 for simply passing the header
+%   received with the message we acknowledge.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#ACK
 
@@ -577,12 +580,36 @@ stomp_ack(Connection, MessageId, Headers) :-
 
 %!  stomp_nack(+Connection, +MessageId, +Headers) is det.
 %
-%   Send a ``NACK`` frame.
+%   Send a ``NACK`` frame.  See  stomp_nack/2   for  simply  passing the
+%   header received with the message we acknowledge.
 %
 %   @see http://stomp.github.io/stomp-specification-1.1.html#NACK
 
 stomp_nack(Connection, MessageId, Headers) :-
     send_frame(Connection, nack, Headers.put('message-id', MessageId)).
+
+%!  stomp_ack(+Connection, +MsgHeader) is det.
+%!  stomp_nack(+Connection, +MsgHeader) is det.
+%
+%   Reply with an ACK or NACK based on the received message header. On a
+%   STOMP 1.1 request we get an `ack` field in the header and reply with
+%   an  `id`.  For  STOMP  1.2  we   reply  with  the  `message-id`  and
+%   `subscription` that we received with the message.
+
+stomp_ack(Connection, Header) :-
+    stomp_ack_nack(Connection, ack, Header).
+
+stomp_nack(Connection, Header) :-
+    stomp_ack_nack(Connection, nack, Header).
+
+stomp_ack_nack(Connection, Type, Header) :-
+    (   Id = Header.get(ack)
+    ->  send_frame(Connection, Type, _{id: Id})
+    ;   Pass = _{'message-id':_, subscription:_},
+        Pass :< Header
+    ->  send_frame(Connection, Type, Pass)
+    ).
+
 
 %!  stomp_begin(+Connection, +Transaction) is det.
 %
