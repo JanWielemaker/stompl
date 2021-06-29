@@ -765,7 +765,7 @@ send_header(Stream, Headers) :-
     nl(Stream).
 
 send_header_line(Stream, Name-Value) :-
-    (   integer(Value)
+    (   number(Value)
     ->  format(Stream, '~w:~w\n', [Name,Value])
     ;   escape_value(Value, String),
         format(Stream, '~w:~w\n', [Name,String])
