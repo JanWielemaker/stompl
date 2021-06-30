@@ -19,8 +19,7 @@ Source     code     available     and     pull     requests     accepted
 
 ## Supported STOMP versions
 
-Version 1.0 and 1.1 are supported, while 1.2 is not intentionally
-because I don't like '\r\n', plus it doesn't bring many new features.
+STOMP versions 1.0, 1.1 and 1.2 are supported.
 
 ## Example
 
