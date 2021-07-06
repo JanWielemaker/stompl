@@ -253,7 +253,7 @@ stomp_connection_property(Connection, Property) :-
 stomp_connection_property(Connection, Property) :-
     must_be(compound, Property),
     Property =.. [Name,Value],
-    connection_property(Connection, Name, Value).
+    query_connection_property(Connection, Name, Value).
 
 %!  stomp_destroy_connection(+Connection)
 %
@@ -262,7 +262,7 @@ stomp_connection_property(Connection, Property) :-
 
 stomp_destroy_connection(Connection) :-
     must_be(ground, Connection),
-    (   connection_property(Connection, address, _)
+    (   query_connection_property(Connection, address, _)
     ->  stomp_teardown(Connection),
         retractall(connection_property(Connection, _, _))
     ;   existence_error(stomp_connection, Connection)
@@ -282,16 +282,16 @@ stomp_setup(Connection, Options) :-
     stomp_setup(Connection, _New, Options).
 
 stomp_setup(Connection, false, _) :-
-    connection_property(Connection, stream, _Stream),
+    query_connection_property(Connection, stream, _Stream),
     !.
 stomp_setup(Connection, New, Options) :-
     with_mutex(stompl, stomp_setup_guarded(Connection, New, Options)).
 
 stomp_setup_guarded(Connection, false, _) :-
-    connection_property(Connection, stream, _Stream),
+    query_connection_property(Connection, stream, _Stream),
     !.
 stomp_setup_guarded(Connection, true, Options) :-
-    connection_property(Connection, address, Address),
+    query_connection_property(Connection, address, Address),
     connect(Connection, Address, Stream, Options),
     set_stream(Stream, encoding(utf8)),
     gensym(stompl_receive, Alias),
@@ -383,9 +383,9 @@ wait_retry(Connection, _Why, Retry, Deadline) :-
 stomp_teardown(Connection) :-
     terminate_helper(Connection, receiver_thread_id),
     terminate_helper(Connection, heartbeat_thread_id),
-    forall(connection_property(Connection, stream, Stream),
+    forall(query_connection_property(Connection, stream, Stream),
            close(Stream, [force(true)])),
-    debug(stompl(connection), 'retract connection mapping', []),
+    debug(stompl(connection), 'retract connection mapping for ~p', [Connection]),
     reset_connection_properties(Connection).
 
 terminate_helper(Connection, Helper) :-
@@ -398,7 +398,7 @@ terminate_helper(_, _).
 
 reset_connection_properties(Connection) :-
     findall(P,
-            (   connection_property(Connection, P, _),
+            (   query_connection_property(Connection, P, _),
                 \+ connection_property(P)
             ), Ps),
     forall(member(P, Ps),
@@ -439,7 +439,7 @@ stomp_connect(Connection, Options) :-
     stomp_deadline_connect(Connection, Deadline, Options).
 
 update_reconnect_property(Connection) :-
-    connection_property(Connection, reconnect, disconnected),
+    query_connection_property(Connection, reconnect, disconnected),
     !,
     update_connection_property(Connection, reconnect, true).
 update_reconnect_property(_).
@@ -455,7 +455,7 @@ stomp_deadline_connect(Connection, Deadline, Options) :-
           ;   stomp_teardown(Connection),
               wait_retry(Connection, Error, Retry, Deadline)
           )
-      ;   connection_property(Connection, connected, _)
+      ;   query_connection_property(Connection, connected, _)
       ->  true
       ;   wait_connected(Connection)
       ->  true
@@ -464,8 +464,8 @@ stomp_deadline_connect(Connection, Deadline, Options) :-
       ).
 
 connect_handshake(Connection) :-
-    connection_property(Connection, headers, Headers),
-    connection_property(Connection, host, Host),
+    query_connection_property(Connection, headers, Headers),
+    query_connection_property(Connection, host, Host),
     send_frame(Connection,
                connect,
                Headers.put(_{ 'accept-version':'1.0,1.1,1.2',
@@ -488,7 +488,7 @@ connect_handshake(Connection) :-
     ).
 
 wait_connected(Connection) :-
-    thread_wait(connection_property(Connection, connected, _),
+    thread_wait(query_connection_property(Connection, connected, _),
                 [ timeout(10),
                   wait_preds([connection_property/3])
                 ]),
@@ -513,7 +513,7 @@ stomp_deadline(_Connection, Deadline, Options) :-
     !.
 stomp_deadline(Connection, Deadline, Options) :-
     (   option(timeout(Time), Options)
-    ;   connection_property(Connection, connect_timeout, Time)
+    ;   query_connection_property(Connection, connect_timeout, Time)
     ),
     !,
     (   number(Time)
@@ -547,7 +547,10 @@ stomp_send(Connection, Destination, Headers, Body) :-
 
 stomp_send_json(Connection, Destination, Headers, JSON) :-
     add_transaction(Headers, Headers1),
-    atom_json_term(Body, JSON, [as(string)]),
+    atom_json_term(Body, JSON,
+                   [ as(string),
+                     width(0)           % No layout for speed
+                   ]),
     send_frame(Connection, send,
                Headers1.put(_{ destination:Destination,
                                'content-type':'application/json'
@@ -689,7 +692,7 @@ add_transaction(Headers, Headers).
 %   @see http://stomp.github.io/stomp-specification-1.1.html#DISCONNECT
 
 stomp_disconnect(Connection, Headers) :-
-    (   connection_property(Connection, reconnect, true)
+    (   query_connection_property(Connection, reconnect, true)
     ->  update_connection_property(Connection, reconnect, disconnected)
     ;   true
     ),
@@ -712,7 +715,7 @@ send_frame(Connection, Command, Headers, Body) :-
           true),
     (   var(Formal)
     ->  true
-    ;   connection_property(Connection, reconnect, true)
+    ;   query_connection_property(Connection, reconnect, true)
     ->  notify(Connection, disconnected),
         stomp_teardown(Connection),
         debug(stompl(connection), 'Sending thread reconnects', []),
@@ -749,11 +752,11 @@ send_frame_guarded(Connection, Command, Headers, _Body) :-
 %!  connection_stream(+Connection, -Stream)
 
 connection_stream(Connection, Stream) :-
-    connection_property(Connection, stream, Stream),
+    query_connection_property(Connection, stream, Stream),
     !.
 connection_stream(Connection, Stream) :-
     stomp_connect(Connection),
-    connection_property(Connection, stream, Stream).
+    query_connection_property(Connection, stream, Stream).
 
 send_command(Stream, Command) :-
     string_upper(Command, Upper),
@@ -902,7 +905,7 @@ read_content(Connection, Stream, Header, Content) :-
 
 read_content(Connection, "application/json", Stream, _Header, Content) :-
     !,
-    connection_property(Connection, json_options, Options),
+    query_connection_property(Connection, json_options, Options),
     json_read_dict(Stream, Content, Options).
 read_content(_Connection, _Type, Stream, _Header, Content) :-
     read_string(Stream, _, Content).
@@ -943,7 +946,7 @@ receive_done(Connection, Why) :-
     ),
     notify(Connection, disconnected),
     stomp_teardown(Connection),
-    (   connection_property(Connection, reconnect, true)
+    (   query_connection_property(Connection, reconnect, true)
     ->  debug(stompl(connection), 'Receiver thread reconnects (~p)', [Why]),
         stomp_connect(Connection)
     ;   debug(stompl(connection), 'Receiver thread terminates (~p)', [Why])
@@ -985,7 +988,7 @@ process_connect(error, Connection, Frame) :-
 process_connect(_, _, _).
 
 start_heartbeat_if_required(Connection, Headers) :-
-    (   connection_property(Connection, 'heart-beat', CHB),
+    (   query_connection_property(Connection, 'heart-beat', CHB),
         SHB = Headers.get('heart-beat')
     ->  start_heartbeat(Connection, CHB, SHB)
     ;   true
@@ -1054,7 +1057,7 @@ heartbeat_loop(Connection, SendSleep, ReceiveSleep, SleepTime,
                    SendTime1, ReceiveTime1).
 
 check_receive_heartbeat(Connection, Now, ReceiveSleep) :-
-    connection_property(Connection, received_heartbeat, ReceivedHeartbeat),
+    query_connection_property(Connection, received_heartbeat, ReceivedHeartbeat),
     DiffReceive is Now - ReceivedHeartbeat,
     (   DiffReceive > ReceiveSleep
     ->  debug(stompl(heartbeat),
@@ -1077,7 +1080,7 @@ notify(Connection, FrameType, Header) :-
     notify(Connection, FrameType, Header, "").
 
 notify(Connection, FrameType, Header, Body) :-
-    connection_property(Connection, callback, Callback),
+    query_connection_property(Connection, callback, Callback),
     Error = error(Formal,_),
     (   catch_with_backtrace(
             call(Callback, FrameType, Connection, Header, Body),
@@ -1094,11 +1097,22 @@ update_connection_mapping(Connection, Dict) :-
     maplist(update_connection_property(Connection), Pairs).
 
 update_connection_property(Connection, Name-Value) :-
-    retractall(connection_property(Connection, Name, _)),
-    asserta(connection_property(Connection, Name, Value)).
+    update_connection_property(Connection, Name, Value).
+
 update_connection_property(Connection, Name, Value) :-
+    transaction(update_connection_property_(Connection, Name, Value)).
+
+update_connection_property_(Connection, Name, Value) :-
     retractall(connection_property(Connection, Name, _)),
     asserta(connection_property(Connection, Name, Value)).
+
+query_connection_property(Connection, Name, Value) :-
+    (   nonvar(Name),
+        nonvar(Connection)
+    ->  connection_property(Connection, Name, Value),
+        !
+    ;   connection_property(Connection, Name, Value)
+    ).
 
 
 		 /*******************************
