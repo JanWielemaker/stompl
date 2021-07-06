@@ -1,9 +1,26 @@
 :- module(ex1,
           [ connect/1
           ]).
-
 :- use_module(user:library(stompl)).    % make available on toplevel
 :- use_module(library(stompl)).
+
+/** <module> Simple STOMP example
+
+This file allows some simple interaction with STOMP.  For example:
+
+```
+swipl ex1.pl
+?- connect(C).
+C = 'a09b8dea-de39-11eb-8887-cbf5d67759f6'.
+
+?- stomp_send($C, '/queue/test', _{}, "hello").
+X = 'a09b8dea-de39-11eb-8887-cbf5d67759f6'.
+
+26 ?- Received "hello"
+```
+
+@license This code is in the public domain
+*/
 
 % :- debug(stompl(_)).
 % :- debug(ex1).

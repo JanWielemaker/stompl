@@ -13,6 +13,8 @@ and echos all each `pong:Count` with a `ping:Count` on `/queue/ping`.
 
 This client is setup to automatically   reconnect.  This implies that if
 the connection to the server dies it will try to reconnect.
+
+@license This code is in the public domain
 */
 
 % configure debugging levels

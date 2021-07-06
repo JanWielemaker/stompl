@@ -15,14 +15,17 @@ and in another one e.g.,
 
     time swipl ping.pl --count=1000
 
-Timing on Ubuntu 20.04 on an AMD3950X system is about 5ms per iteration.
-Note that each iteration implies two  exchanges   as  the pong part just
-echos without decrementing. This settles a   send  and receive and about
-2.5ms.  The server is RabbitMQ on Ubuntu using the STOMP plugin.
+Timing on Ubuntu 20.04  on  an  AMD3950X   system  is  about  0.6ms  per
+iteration. Note that each iteration implies   two  exchanges as the pong
+part just echos without decrementing. This   settles  a send and receive
+and about 0.3ms. The server  is  RabbitMQ   on  Ubuntu  using  the STOMP
+plugin.
 
 Note    that    this     compare     fairly      poorly     to     e.g.,
 [rclswi](https://github.com/SWI-Prolog/rclswi),    using    the     ROS2
-middleware which performs roughly 100 times better.
+middleware which performs roughly 10 times better.
+
+@license This code is in the public domain
 */
 
 :- initialization(main, main).
