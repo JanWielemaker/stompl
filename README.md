@@ -1,5 +1,10 @@
 # A STOMP client for SWI-Prolog
 
+> __As of version 8.3.27, STOMP is a  standard SWI-Prolog package. It is
+> available  from  https://github.com/SWI-Prolog/packages-stomp__.  This
+> add-on may still be used with older   versions.  This repository is no
+> longer maintained.
+
 A [STOMP](http://stomp.github.io) client.
 
 > This is a fork from https://github.com/honnix/stompl by Hongxin Liang.
